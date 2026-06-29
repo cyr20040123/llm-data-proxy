@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta:__legacy__"
+
+[project]
+name = "llm-data-proxy"
+version = "0.1.0"
+description = "OpenAI-compatible LLM proxy with ChatML conversation logging"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+brotli = ["brotli"]
+
+[project.scripts]
+llm-data-proxy = "llmdataproxy.main:main"
+llm-data-proxy-new-session = "llmdataproxy.tools.new_session:main"
+llm-data-proxy-strip-chatml = "llmdataproxy.tools.strip_chatml:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+llmdataproxy = ["chatml_schema.json"]

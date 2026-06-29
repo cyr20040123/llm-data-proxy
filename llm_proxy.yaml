@@ -1,0 +1,19 @@
+DEFAULT:
+  host: 0.0.0.0
+  port: 8030
+  base-url: http://127.0.0.1:8000
+  api-key: ''
+  log-folder: ./logs/
+  log-chatml: none
+  rl: false
+  temperature: -1.0
+  default-model: null
+RECENT:
+  host: 127.0.0.1
+  port: 44985
+  base-url: http://127.0.0.1:47991
+  log-folder: /tmp/llm_proxy_test_zudppgwc
+  log-chatml: multi
+  session-name: test_sess
+  session-path: /tmp/llm_proxy_test_b10izc87
+  override-model: false

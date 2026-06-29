@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-proxy/chatml.schema.json",
+  "title": "ChatML Session",
+  "description": "JSON Schema for llm_proxy ChatML multi-mode session output.",
+  "type": "object",
+  "required": ["messages"],
+  "properties": {
+    "messages": {
+      "type": "array",
+      "description": "Ordered conversation messages.",
+      "items": { "$ref": "#/$defs/message" }
+    },
+    "remarks": {
+      "type": "object",
+      "description": "Session metadata.",
+      "required": [],
+      "properties": {
+        "incomplete": {
+          "type": "boolean",
+          "description": "True when the conversation was cut off mid-turn (last message is not from the assistant)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "tools": {
+      "type": "array",
+      "description": "Tool definitions visible to the model during this conversation.",
+      "items": { "$ref": "#/$defs/tool_definition" }
+    }
+  },
+  "additionalProperties": false,
+
+  "$defs": {
+    "message": {
+      "description": "A single conversation turn.",
+      "oneOf": [
+        { "$ref": "#/$defs/system_message" },
+        { "$ref": "#/$defs/user_message" },
+        { "$ref": "#/$defs/assistant_message" },
+        { "$ref": "#/$defs/tool_message" }
+      ]
+    },
+
+    "system_message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "const": "system" },
+        "content": { "$ref": "#/$defs/non_assistant_content" },
+        "timestamp": {
+          "type": "string",
+          "description": "ISO 8601 UTC timestamp, or empty string if the proxy did not directly witness this message."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional participant name."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "user_message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "const": "user" },
+        "content": { "$ref": "#/$defs/non_assistant_content" },
+        "timestamp": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "assistant_message": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "const": "assistant" },
+        "content": {
+          "type": ["string", "null"],
+          "description": "The assistant's text response. Null when only a tool call is made with no accompanying text."
+        },
+        "timestamp": { "type": "string" },
+        "name": { "type": "string" },
+        "tool_calls": {
+          "type": "array",
+          "description": "Tool calls requested by the assistant.",
+          "items": { "$ref": "#/$defs/tool_call" }
+        },
+        "reasoning_content": {
+          "type": "string",
+          "description": "Chain-of-thought reasoning (DeepSeek R1, o-series style). Mutually exclusive with 'reasoning'."
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "Legacy chain-of-thought reasoning. Mutually exclusive with 'reasoning_content'."
+        },
+        "refusal": {
+          "type": ["string", "null"],
+          "description": "Refusal reason when the assistant declines to answer."
+        },
+        "annotations": { "type": ["array", "null"] },
+        "audio": { "type": "null" },
+        "function_call": { "type": "null" },
+
+        "prompt_ids": {
+          "type": "array",
+          "description": "[--rl] Token IDs of the entire prompt.",
+          "items": { "type": "integer" }
+        },
+        "completion_ids": {
+          "type": "array",
+          "description": "[--rl] Token IDs generated for this response.",
+          "items": { "type": "integer" }
+        },
+        "logprobs": {
+          "type": "array",
+          "description": "[--rl] Log-probability for each generated token, aligned with completion_ids.",
+          "items": { "type": "number" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "tool_message": {
+      "type": "object",
+      "required": ["role", "content", "tool_call_id"],
+      "properties": {
+        "role": { "const": "tool" },
+        "content": {
+          "type": "string",
+          "description": "The tool's response content."
+        },
+        "tool_call_id": {
+          "type": "string",
+          "description": "ID of the tool call this message responds to."
+        },
+        "timestamp": { "type": "string" },
+        "name": {
+          "type": "string",
+          "description": "Optional tool/function name."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "non_assistant_content": {
+      "description": "Content for system and user messages. Must be a non-null string or a multimodal content array.",
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/content_part" }
+        }
+      ]
+    },
+
+    "content_part": {
+      "description": "A single part of a multimodal message.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "image_url"],
+          "properties": {
+            "type": { "const": "image_url" },
+            "image_url": {
+              "type": "object",
+              "required": ["url"],
+              "properties": {
+                "url": { "type": "string" },
+                "detail": { "enum": ["auto", "low", "high"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "tool_call": {
+      "type": "object",
+      "required": ["id", "type", "function"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "function" },
+        "function": {
+          "type": "object",
+          "required": ["name", "arguments"],
+          "properties": {
+            "name": { "type": "string" },
+            "arguments": {
+              "description": "Tool arguments as a parsed JSON object (normalized from the raw JSON string by the proxy).",
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "tool_definition": {
+      "type": "object",
+      "required": ["type", "function"],
+      "properties": {
+        "type": { "const": "function" },
+        "function": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string" },
+            "description": { "type": "string" },
+            "parameters": {
+              "type": "object",
+              "description": "JSON Schema for the tool's parameters."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
