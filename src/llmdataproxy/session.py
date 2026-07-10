@@ -71,6 +71,14 @@ def _canonical(msg):
     return json.dumps(d, sort_keys=True, ensure_ascii=False)
 
 
+def _is_hint_message(msg: dict) -> bool:
+    """Return True if *msg* is a standalone global-hint user message."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content", "")
+    return isinstance(content, str) and content.startswith("(Global hint:")
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -84,6 +92,7 @@ class SessionManager:
         self.session_path = session_path or log_folder
         self.rl_enabled = rl_enabled
         self.sessions = []
+        self.hint_content: str | None = None
 
     @property
     def enabled(self):
@@ -93,30 +102,53 @@ class SessionManager:
     # Prefix matching
     # ------------------------------------------------------------------
     def find_matching_session(self, request_messages):
-        """Return (session, match_len) where session.messages[:match_len]
-        is a prefix of request_messages.  Only active in 'multi' mode.
-        Comparison ignores timestamps and normalises tool-call arguments.
-        A mismatch on system messages alone is tolerated (logged as a warning)."""
+        """Return (session, match_len) where the non-hint messages in
+        session.messages are a prefix of the non-hint messages in
+        *request_messages*.  Only active in 'multi' mode.
+
+        Global-hint user messages are skipped during comparison so that
+        hints injected by the proxy (recorded in ChatML) do not prevent
+        the client (which does not send hints) from matching stored
+        sessions.  *match_len* is an unfiltered index into
+        *request_messages* — the first message not yet stored."""
         if self.mode != "multi":
             return None, 0
         for sess in self.sessions:
             sess_msgs = sess["messages"]
-            if len(sess_msgs) > len(request_messages):
-                continue
+            si = 0          # index in session messages
+            ri = 0          # index in request messages
             ok = True
             system_mismatch = False
-            for i, sm in enumerate(sess_msgs):
-                if _canonical(sm) != _canonical(request_messages[i]):
-                    if (sm.get("role") == "system" and
-                            request_messages[i].get("role") == "system"):
+
+            while si < len(sess_msgs) and ri < len(request_messages):
+                # Skip hint messages on both sides
+                if _is_hint_message(sess_msgs[si]):
+                    si += 1
+                    continue
+                if _is_hint_message(request_messages[ri]):
+                    ri += 1
+                    continue
+
+                if _canonical(sess_msgs[si]) != _canonical(request_messages[ri]):
+                    if (sess_msgs[si].get("role") == "system" and
+                            request_messages[ri].get("role") == "system"):
                         system_mismatch = True
+                        si += 1
+                        ri += 1
                         continue
                     ok = False
                     break
-            if ok:
+                si += 1
+                ri += 1
+
+            # Skip any trailing hint messages in the stored session
+            while si < len(sess_msgs) and _is_hint_message(sess_msgs[si]):
+                si += 1
+
+            if ok and si == len(sess_msgs):
                 if system_mismatch:
                     logger.warning("session matched with different system prompt")
-                return sess, len(sess_msgs)
+                return sess, ri
         return None, 0
 
     # ------------------------------------------------------------------

@@ -60,6 +60,19 @@ def _inject_temperature(body: dict, temperature_default: float) -> None:
         body["temperature"] = temperature_default
 
 
+def _inject_hint(messages: list, hint_content: str | None) -> None:
+    """Inject a standalone hint user-message at the end of *messages*
+    (in-place) when the count of assistant messages is even.  Never modifies
+    existing message content."""
+    if not hint_content:
+        return
+    assistant_count = sum(1 for m in messages if m.get("role") == "assistant")
+    if assistant_count % 2 != 0:
+        return
+
+    messages.append({"role": "user", "content": f"(Global hint: {hint_content})"})
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -72,7 +85,24 @@ def create_app(base_url: str, api_key: str, session_manager: SessionManager,
     temperature_default = temperature_arg  # capture for handler closures
     # When --override-model is set and default_model is available, force all
     # requests to use the default model (equivalent to /change_override_model).
-    model_override = [default_model] if (override_model and default_model) else [None]
+    model_override: list[str | None] = [default_model] if (override_model and default_model) else [None]
+
+    # --- /hint ---
+    @app.post("/hint")
+    async def hint(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        hint_text = body.get("hint", "")
+        if not hint_text or not hint_text.strip():
+            session_manager.hint_content = None
+            logger.info("hint: cleared")
+            return {"status": "ok", "hint": None}
+        else:
+            session_manager.hint_content = hint_text.strip()
+            logger.info("hint: set to '%s'", hint_text)
+            return {"status": "ok", "hint": hint_text}
 
     # --- /proxyhealth ---
     @app.get("/proxyhealth")
@@ -168,6 +198,9 @@ async def _handle_chat_completions(request: Request, upstream: str, api_key: str
     tools = body.get("tools")
     is_stream = body.get("stream", False)
     req_ts = _now_iso()
+
+    # --- inject hint (before session recording so it is captured in ChatML) ---
+    _inject_hint(messages, session_mgr.hint_content)
 
     # --- session matching ---
     # Deep-copy messages before passing to session manager because

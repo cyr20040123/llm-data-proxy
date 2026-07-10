@@ -93,6 +93,7 @@ On startup, the proxy logs all resolved parameters; values differing from `DEFAU
 | POST | `/newsession` | Dump current ChatML sessions to file, switch to a new session. Body: `{"session_name": "...", "session_path": "..."}` |
 | GET | `/session_chats` | Return all current sessions in ChatML JSON format (read-only, does not dump to file). Requires `--log-chatml` ≠ `none` |
 | POST | `/change_override_model` | Override the `model` field in forwarded requests, or clear the override. Body: `{"model": "model-id"}` |
+| POST | `/hint` | Set or clear a global hint injected into chat requests when the assistant message count is even. Body: `{"hint": "be concise"}` |
 | POST | `/v1/chat/completions` | Forward to upstream, record in ChatML session |
 | POST | `/v1/completions` | Legacy completions endpoint |
 | * | `/{path}` | Catch-all — forwards any other request to upstream |
@@ -145,6 +146,80 @@ client sends  "model": "gpt-4"  →  "model": "gpt-4"  (preserved)
 
 - Both mechanisms apply to `/v1/chat/completions` and `/v1/completions`.
 - On startup, the proxy fetches the available model list from upstream `GET /v1/models` and stores it in `app.state.available_models`.
+
+## Global Hint
+
+The `/hint` endpoint sets a persistent global hint that is automatically injected into `/v1/chat/completions` requests forwarded to the upstream. It is useful for reinforcing instructions across multi-turn conversations without modifying client code.
+
+### How it works
+
+1. The proxy counts how many `role: "assistant"` messages are in the current request's `messages` array.
+2. If the count is **even** (0, 2, 4, …), a new `{"role": "user", "content": "(Global hint: <hint>)"}` message is appended to the end of the array.
+3. If the count is **odd**, nothing is added.
+
+Existing message content is never modified — the hint is always a standalone message.
+
+### Usage
+
+```bash
+# Set a hint
+curl -X POST http://localhost:8030/hint \
+  -H "Content-Type: application/json" \
+  -d '{"hint": "be concise and use bullet points"}'
+# → {"status": "ok", "hint": "be concise and use bullet points"}
+
+# Clear the hint (empty string or whitespace-only)
+curl -X POST http://localhost:8030/hint \
+  -H "Content-Type: application/json" \
+  -d '{"hint": ""}'
+# → {"status": "ok", "hint": null}
+```
+
+### Examples
+
+**Even assistant count (0) — new hint message appended:**
+```json
+// Request messages before injection:
+[{"role": "user", "content": "What is Python?"}]
+
+// After injection (hint = "be concise"):
+[
+  {"role": "user", "content": "What is Python?"},
+  {"role": "user", "content": "(Global hint: be concise)"}
+]
+```
+
+**Even assistant count (2) — new hint message appended:**
+```json
+// Request messages before injection:
+[
+  {"role": "user", "content": "Q1"},
+  {"role": "assistant", "content": "A1"},
+  {"role": "user", "content": "Q2"},
+  {"role": "assistant", "content": "A2"}
+]
+
+// After injection (hint = "be concise"):
+[
+  {"role": "user", "content": "Q1"},
+  {"role": "assistant", "content": "A1"},
+  {"role": "user", "content": "Q2"},
+  {"role": "assistant", "content": "A2"},
+  {"role": "user", "content": "(Global hint: be concise)"}
+]
+```
+
+**Odd assistant count — no injection:**
+```json
+// Request messages:
+[
+  {"role": "user", "content": "Hello"},
+  {"role": "assistant", "content": "Hi!"}
+]
+// Assistant count = 1 (odd) → no change
+```
+
+> **Note:** The hint is injected into the forwarded request body *and* recorded in ChatML session logs. During prefix matching, standalone hint messages are skipped — so the presence or absence of hints does not affect multi-turn conversation matching.
 
 ## ChatML Output
 
