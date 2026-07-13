@@ -5,21 +5,15 @@ OpenAI-compatible LLM proxy with ChatML conversation logging. Forwards requests 
 ## Installation
 
 ```bash
-pip install llm-data-proxy
+git clone <repo-url>
+cd llm-data-proxy
+pip install -e .
 ```
 
 For brotli compression support (optional):
 
 ```bash
-pip install llm-data-proxy[brotli]
-```
-
-For development:
-
-```bash
-git clone <repo-url>
-cd llm-data-proxy
-pip install -e .
+pip install -e ".[brotli]"
 ```
 
 ## Quick Start
@@ -45,7 +39,9 @@ python -m llmdataproxy --base-url http://localhost:8000 --api-key sk-your-key
 - **ChatML session logging** — Multi-turn conversation tracking with prefix matching, output as JSON with per-message ISO timestamps
 - **Persistent config** — Parameters auto-saved to `llm_proxy.yaml`, with preset groups and diff-based RECENT tracking
 - **Graceful shutdown** — Dumps pending ChatML sessions on SIGINT/SIGTERM
-- **Pip-installable** — Install with `pip install`, use via `llm-data-proxy` command
+- **Editable install** — Install with `pip install -e .`, use via `llm-data-proxy` command
+
+> **Important:** One llm-data-proxy instance only supports collecting the conversation trajectory of a **single agent** — concurrent collection is **not supported**. To collect trajectories from multiple agents simultaneously, start multiple llm-data-proxy instances on different ports.
 
 ## Configuration
 
