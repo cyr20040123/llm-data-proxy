@@ -32,6 +32,72 @@ You can also use:
 python -m llmdataproxy --base-url http://localhost:8000 --api-key sk-your-key
 ```
 
+## Typical Workflow
+
+### 1. Start the proxy
+
+```bash
+llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml multi
+```
+
+Proxy listens on `0.0.0.0:8030`, forwards requests to `http://127.0.0.1:8000`.
+
+### 2. Point your client at the proxy
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:8030/v1", api_key="anything")
+```
+
+### 3. Conversations are recorded automatically
+
+```
+Turn 1: client sends [sys, user:"Hello"]
+        → proxy creates new session, forwards to upstream, records response
+        → session: [sys(t=""), user(t=14:01:00), assistant(t=14:01:01)]
+
+Turn 2: client sends [sys, user:"Hello", assistant:"Hi!", user:"How are you?"]
+        → proxy prefix-matches against Turn 1's session
+        → appends only the new messages: user:"How are you?" + assistant response
+        → session adds: [user(t=14:02:00), assistant(t=14:02:01)]
+```
+
+**Prefix matching**: the proxy compares incoming message history against recorded sessions. If a suffix can be appended to an existing session, it continues that session. Otherwise, a new session is created.
+
+### 4. Save trajectories
+
+- `POST /newsession` — immediately dumps sessions to disk
+- `Ctrl+C` — graceful shutdown saves all pending sessions
+
+Output: `./logs/{session_name}.chatml.json`
+
+### 5. Understanding the output
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "...",       "timestamp": ""},
+    {"role": "user", "content": "Hello",       "timestamp": "2026-07-13T14:01:00.123+00:00"},
+    {"role": "assistant", "content": "Hi!",    "timestamp": "2026-07-13T14:01:01.456+00:00"},
+    {"role": "user", "content": "How are you?","timestamp": "2026-07-13T14:02:00.789+00:00"},
+    {"role": "assistant", "content": "I'm fine","timestamp": "2026-07-13T14:02:01.012+00:00"}
+  ],
+  "remarks": { "incomplete": false }
+}
+```
+
+- **`timestamp: ""`** — messages not directly witnessed by the proxy (historical context echoed by client, or system prompt)
+- **`timestamp: "<ISO>"`** — recorded by proxy; user messages get the request arrival time, assistant messages get the response return time
+- **`incomplete: false`** — conversation ended normally (last message is from assistant); `true` means truncated mid-turn
+- Multiple `.chatml.json` files mean independent conversations exist under the same session name
+
+### Related configuration
+
+| Parameter | Purpose |
+|-----------|---------|
+| `--log-folder ./logs/` | Runtime log directory |
+| `--session-path ./logs/` | ChatML trajectory output directory (defaults to `--log-folder`) |
+| `--session-name sess_0713_1400` | Trajectory filename prefix |
+
 ## Features
 
 - **Transparent proxying** — `/v1/chat/completions`, `/v1/completions`, and catch-all forwarding for any other endpoint (e.g. `/v1/models`)

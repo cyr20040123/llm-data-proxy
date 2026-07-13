@@ -32,6 +32,72 @@ llm-data-proxy --base-url http://localhost:8000 --api-key sk-your-key --log-chat
 python -m llmdataproxy --base-url http://localhost:8000 --api-key sk-your-key
 ```
 
+## 典型流程
+
+### 1. 启动代理
+
+```bash
+llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml multi
+```
+
+代理监听 `0.0.0.0:8030`，转发请求到 `http://127.0.0.1:8000`。
+
+### 2. 客户端连接
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:8030/v1", api_key="anything")
+```
+
+### 3. 对话自动记录
+
+```
+第1轮: 客户端发 [sys, user:"Hello"]
+       → 代理创建新 session，转发到 upstream，记录响应
+       → session: [sys(t=""), user(t=14:01:00), assistant(t=14:01:01)]
+
+第2轮: 客户端发 [sys, user:"Hello", assistant:"Hi!", user:"How are you?"]
+       → 代理通过前缀匹配找到第1轮的 session
+       → 只追加新消息 user:"How are you?" 和 assistant 响应
+       → session 新增: [user(t=14:02:00), assistant(t=14:02:01)]
+```
+
+**前缀匹配**：代理将客户端发来的消息历史与已记录的 session 逐一比较。如果新消息能续接到已有 session，则继续该 session；匹配不上则创建新 session。
+
+### 4. 保存轨迹
+
+- `POST /newsession` — 立即保存 session 到磁盘
+- `Ctrl+C` — 优雅退出时自动保存所有 session
+
+输出文件：`./logs/{session_name}.chatml.json`
+
+### 5. 结果解读
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "...",       "timestamp": ""},
+    {"role": "user", "content": "你好",         "timestamp": "2026-07-13T14:01:00.123+00:00"},
+    {"role": "assistant", "content": "你好！",  "timestamp": "2026-07-13T14:01:01.456+00:00"},
+    {"role": "user", "content": "最近怎么样？",  "timestamp": "2026-07-13T14:02:00.789+00:00"},
+    {"role": "assistant", "content": "挺好的",   "timestamp": "2026-07-13T14:02:01.012+00:00"}
+  ],
+  "remarks": { "incomplete": false }
+}
+```
+
+- **`timestamp: ""`** — 代理未直接见证的消息（客户端回传的历史上下文，或 system prompt）
+- **`timestamp: "<ISO>"`** — 代理记录的时刻，user 消息是请求到达时间，assistant 消息是响应返回时间
+- **`incomplete: false`** — 对话正常结束（最后一条是 assistant）；`true` 表示中途截断
+- 存在多个 `.chatml.json` 文件代表同一 session 下有多个独立对话分支
+
+### 相关配置
+
+| 参数 | 作用 |
+|------|------|
+| `--log-folder ./logs/` | 运行日志目录 |
+| `--session-path ./logs/` | ChatML 轨迹输出目录（默认同 log-folder） |
+| `--session-name sess_0713_1400` | 轨迹文件名前缀 |
+
 ## 功能特性
 
 - **透明代理** — `/v1/chat/completions`、`/v1/completions`，以及任意其他端点的通用转发（如 `/v1/models`）
