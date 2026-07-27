@@ -26,13 +26,14 @@ _HARD_DEFAULTS = {
     "rl": False,
     "default_model": None,
     "override_model": False,
+    "parse_arguments": False,
 }
 
 # Fields persisted to YAML RECENT (in order)
 _CONFIG_FIELDS = [
     "host", "port", "base_url", "api_key", "log_folder", "log_chatml",
     "session_name", "session_path", "temperature", "rl", "default_model",
-    "override_model",
+    "override_model", "parse_arguments",
 ]
 
 # Fields that are always written to RECENT (even if matching DEFAULT)
@@ -178,6 +179,9 @@ def parse_args():
                         help="Force all requests to use --default-model")
     parser.add_argument("--default-model", default=_UNSET,
                         help="Default model for requests with empty or 'none' model")
+    parser.add_argument("--parse-arguments", default=None, action="store_true",
+                        help="Parse tool_calls arguments from JSON string to dict "
+                             "(default: keep as JSON string)")
     parser.add_argument("--preset", default=_UNSET,
                         help="Name of a YAML config group to load (e.g. DEEPSEEK)")
     parser.add_argument("--config-file", default=None,
@@ -227,7 +231,7 @@ def parse_args():
         """Get CLI value for field, returning _UNSET if not explicitly provided."""
         # argparse action="store_true" always returns True/False, never _UNSET,
         # so detect via the actual dest attr
-        if key in ("rl", "override_model"):
+        if key in ("rl", "override_model", "parse_arguments"):
             return _UNSET if getattr(cli_args, key) is None else getattr(cli_args, key)
         return getattr(cli_args, key)
 

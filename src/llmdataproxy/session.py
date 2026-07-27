@@ -39,7 +39,10 @@ def _normalize_msg_arguments(msg: dict) -> dict:
             try:
                 func["arguments"] = json.loads(args)
             except (json.JSONDecodeError, TypeError):
-                pass
+                logger.warning(
+                    "failed to parse tool_calls arguments JSON, keeping as string: %.200s",
+                    args,
+                )
     return msg
 
 
@@ -85,12 +88,13 @@ def _now_iso():
 
 class SessionManager:
     def __init__(self, log_folder, session_name, mode, session_path="",
-                 rl_enabled=False):
+                 rl_enabled=False, parse_arguments=False):
         self.log_folder = log_folder
         self.session_name = session_name
         self.mode = mode  # "none", "multi", "multi-strict", "single"
         self.session_path = session_path or log_folder
         self.rl_enabled = rl_enabled
+        self.parse_arguments = parse_arguments
         self.sessions = []
         self.hint_content: str | None = None
 
@@ -169,7 +173,8 @@ class SessionManager:
                 ts = ""
             else:
                 ts = timestamp if i == len(request_messages) - 1 else ""
-            _normalize_msg_arguments(msg)
+            if self.parse_arguments:
+                _normalize_msg_arguments(msg)
             session["messages"].append({**msg, "timestamp": ts})
         self.sessions.append(session)
         return session
@@ -181,7 +186,8 @@ class SessionManager:
         new_msgs = request_messages[match_len:]
         ts = "" if self.mode == "single" else timestamp
         for msg in new_msgs:
-            _normalize_msg_arguments(msg)
+            if self.parse_arguments:
+                _normalize_msg_arguments(msg)
             session["messages"].append({**msg, "timestamp": ts})
         if tools:
             known = {t.get("function", {}).get("name") for t in session["tools"]}
@@ -194,7 +200,8 @@ class SessionManager:
     def append_response(self, session, response_message, timestamp):
         """Append an assistant response message.  Timestamp omitted in 'single' mode."""
         ts = "" if self.mode == "single" else timestamp
-        _normalize_msg_arguments(response_message)
+        if self.parse_arguments:
+            _normalize_msg_arguments(response_message)
         session["messages"].append({**response_message, "timestamp": ts})
 
     # ------------------------------------------------------------------

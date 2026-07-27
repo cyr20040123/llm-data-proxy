@@ -138,7 +138,8 @@ def main():
         return
 
     session_mgr = SessionManager(args.log_folder, args.session_name, args.log_chatml,
-                                 args.session_path, rl_enabled=args.rl)
+                                 args.session_path, rl_enabled=args.rl,
+                                 parse_arguments=args.parse_arguments)
 
     # --- fetch available models from upstream ---
     available_models = []

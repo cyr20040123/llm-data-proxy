@@ -397,6 +397,81 @@ class TestSessionManager:
         mgr.append_response(sess, {"role": "assistant", "content": "A1"}, "ts2")
         assert sess["messages"][1]["timestamp"] == ""
 
+    def test_parse_arguments_enabled(self):
+        """With parse_arguments=True, tool_calls arguments are parsed to dict."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "s", "multi", session_path=d, parse_arguments=True)
+            msgs = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Beijing"}'
+                    }
+                }]
+            }]
+            sess = mgr.create_session(msgs, "ts")
+            args = sess["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            assert isinstance(args, dict)
+            assert args == {"city": "Beijing"}
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_parse_arguments_disabled_default(self):
+        """By default, tool_calls arguments are kept as JSON string."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "s", "multi", session_path=d)
+            msgs = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Beijing"}'
+                    }
+                }]
+            }]
+            sess = mgr.create_session(msgs, "ts")
+            args = sess["messages"][0]["tool_calls"][0]["function"]["arguments"]
+            assert isinstance(args, str)
+            assert args == '{"city": "Beijing"}'
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_parse_arguments_disabled_append_response(self):
+        """With parse_arguments=False, response tool_calls arguments stay as string."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "s", "multi", session_path=d, parse_arguments=False)
+            mgr.create_session([{"role": "user", "content": "Q1"}], "ts")
+            mgr.append_response(mgr.sessions[0], {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city": "Shenzhen"}'
+                    }
+                }]
+            }, "ts2")
+            args = mgr.sessions[0]["messages"][1]["tool_calls"][0]["function"]["arguments"]
+            assert isinstance(args, str)
+            assert args == '{"city": "Shenzhen"}'
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
 
 class TestNowIso:
     def test_returns_iso_format(self):

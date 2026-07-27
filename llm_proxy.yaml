@@ -6,5 +6,6 @@ DEFAULT:
   log-folder: ./logs/
   log-chatml: multi
   rl: false
+  parse-arguments: false
   temperature: -1.0
   default-model: null
