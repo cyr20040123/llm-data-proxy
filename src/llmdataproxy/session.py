@@ -88,7 +88,7 @@ class SessionManager:
                  rl_enabled=False):
         self.log_folder = log_folder
         self.session_name = session_name
-        self.mode = mode  # "none", "multi", "single"
+        self.mode = mode  # "none", "multi", "multi-strict", "single"
         self.session_path = session_path or log_folder
         self.rl_enabled = rl_enabled
         self.sessions = []
@@ -98,20 +98,24 @@ class SessionManager:
     def enabled(self):
         return self.mode != "none"
 
+    @property
+    def _is_multi_like(self):
+        return self.mode in ("multi", "multi-strict")
+
     # ------------------------------------------------------------------
     # Prefix matching
     # ------------------------------------------------------------------
     def find_matching_session(self, request_messages):
         """Return (session, match_len) where the non-hint messages in
         session.messages are a prefix of the non-hint messages in
-        *request_messages*.  Only active in 'multi' mode.
+        *request_messages*.  Only active in 'multi' and 'multi-strict' modes.
 
         Global-hint user messages are skipped during comparison so that
         hints injected by the proxy (recorded in ChatML) do not prevent
         the client (which does not send hints) from matching stored
         sessions.  *match_len* is an unfiltered index into
         *request_messages* — the first message not yet stored."""
-        if self.mode != "multi":
+        if not self._is_multi_like:
             return None, 0
         for sess in self.sessions:
             sess_msgs = sess["messages"]
@@ -202,13 +206,15 @@ class SessionManager:
         results = []
         for sess in self.sessions:
             msgs = sess["messages"]
-            chatml_msgs, incomplete = self._build_chatml(msgs)
+            strict = self.mode == "multi-strict"
+            chatml_msgs, incomplete = self._build_chatml(msgs, strict=strict)
             if chatml_msgs is None:
                 continue
             entry = {
                 "messages": chatml_msgs,
-                "remarks": {"incomplete": incomplete},
             }
+            if strict:
+                entry["remarks"] = {"incomplete": incomplete}
             if sess.get("tools"):
                 entry["tools"] = sess["tools"]
             results.append(entry)
@@ -259,14 +265,16 @@ class SessionManager:
 
     def _dump_session(self, sess, suffix="", output_dir=None):
         msgs = sess["messages"]
-        chatml_msgs, incomplete = self._build_chatml(msgs)
+        strict = self.mode == "multi-strict"
+        chatml_msgs, incomplete = self._build_chatml(msgs, strict=strict)
         if chatml_msgs is None:
             return
 
         output = {
             "messages": chatml_msgs,
-            "remarks": {"incomplete": incomplete},
         }
+        if strict:
+            output["remarks"] = {"incomplete": incomplete}
         if sess.get("tools"):
             output["tools"] = sess["tools"]
 
@@ -275,12 +283,21 @@ class SessionManager:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
 
-    def _build_chatml(self, messages):
-        """If the session ends with an assistant message it is complete.
-        Otherwise truncate to the longest prefix ending with an assistant
-        message and mark incomplete."""
+    def _build_chatml(self, messages, strict=True):
+        """Build ChatML output from messages.
+
+        In strict mode (multi-strict): if the session ends with an
+        assistant message it is complete.  Otherwise truncate to the
+        longest prefix ending with an assistant message and mark
+        incomplete.
+
+        In non-strict mode (multi): return all messages as-is, never
+        truncate or mark incomplete."""
         if not messages:
             return None, False
+
+        if not strict:
+            return messages, False
 
         if messages[-1].get("role") == "assistant":
             return messages, False

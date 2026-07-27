@@ -193,6 +193,20 @@ class TestSessionManager:
         )
         assert sess is None
 
+    def test_find_matching_session_multi_strict(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi-strict", session_path=d)
+            mgr.create_session([{"role": "user", "content": "Q1"}], "ts")
+            sess, match_len = mgr.find_matching_session(
+                [{"role": "user", "content": "Q1"}]
+            )
+            assert sess is not None
+            assert match_len == 1
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_append_request_messages(self, mgr):
         sess = mgr.create_session(
             [{"role": "user", "content": "Q1"}], "ts1"
@@ -234,22 +248,81 @@ class TestSessionManager:
         assert sess["messages"][1]["role"] == "assistant"
         assert sess["messages"][1]["timestamp"] == "ts2"
 
-    def test_dump_multi_mode(self, mgr):
-        sess = mgr.create_session(
-            [{"role": "user", "content": "Q1"}], "2026-01-01T00:00:00Z"
-        )
-        mgr.append_response(
-            sess, {"role": "assistant", "content": "A1"}, "2026-01-01T00:00:01Z"
-        )
-        output_dir = mgr.dump_all()
-        files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
-        assert len(files) == 1
-        with open(os.path.join(output_dir, files[0])) as f:
-            data = json.load(f)
-        assert "messages" in data
-        assert "remarks" in data
-        assert data["remarks"]["incomplete"] is False
-        assert len(data["messages"]) == 2
+    def test_dump_multi_strict_mode(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi-strict", session_path=d)
+            sess = mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "2026-01-01T00:00:00Z"
+            )
+            mgr.append_response(
+                sess, {"role": "assistant", "content": "A1"}, "2026-01-01T00:00:01Z"
+            )
+            output_dir = mgr.dump_all()
+            files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
+            assert len(files) == 1
+            with open(os.path.join(output_dir, files[0])) as f:
+                data = json.load(f)
+            assert "messages" in data
+            assert "remarks" in data
+            assert data["remarks"]["incomplete"] is False
+            assert len(data["messages"]) == 2
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dump_multi_mode_no_truncation(self):
+        """Multi mode: no truncation, no remarks. Session ends with user msg — kept as-is."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi", session_path=d)
+            mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "ts"
+            )
+            mgr.append_response(
+                mgr.sessions[0],
+                {"role": "assistant", "content": "A1"},
+                "ts2",
+            )
+            # Add another user message without response — should NOT be truncated
+            mgr.append_request_messages(
+                mgr.sessions[0],
+                [{"role": "user", "content": "Q1"},
+                 {"role": "assistant", "content": "A1"},
+                 {"role": "user", "content": "Q2"}],
+                match_len=2,
+                timestamp="ts3",
+            )
+            output_dir = mgr.dump_all()
+            files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
+            assert len(files) == 1
+            with open(os.path.join(output_dir, files[0])) as f:
+                data = json.load(f)
+            assert "messages" in data
+            assert "remarks" not in data
+            assert len(data["messages"]) == 3  # user, assistant, user — all kept
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dump_multi_mode_no_assistant_still_written(self):
+        """Multi mode: even session with no assistant msg is written (unlike strict)."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi", session_path=d)
+            mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "ts"
+                # No assistant response
+            )
+            output_dir = mgr.dump_all()
+            files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
+            assert len(files) == 1  # written, unlike strict mode
+            with open(os.path.join(output_dir, files[0])) as f:
+                data = json.load(f)
+            assert "remarks" not in data
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_dump_single_mode(self):
         d = tempfile.mkdtemp()
@@ -274,16 +347,40 @@ class TestSessionManager:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_dump_incomplete_session(self, mgr):
-        mgr.create_session(
-            [{"role": "user", "content": "Q1"}], "ts"
-            # No assistant response — incomplete
-        )
-        output_dir = mgr.dump_all()
-        files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
-        assert len(files) == 0  # No assistant msg → not dumped
+    def test_dump_incomplete_session_strict(self, mgr):
+        # multi-strict: session with only user msg (no assistant) is not dumped
+        d = tempfile.mkdtemp()
+        try:
+            strict_mgr = SessionManager(d, "test_sess", "multi-strict", session_path=d)
+            strict_mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "ts"
+                # No assistant response — incomplete
+            )
+            output_dir = strict_mgr.dump_all()
+            files = [f for f in os.listdir(output_dir) if f.endswith(".chatml.json")]
+            assert len(files) == 0  # No assistant msg → not dumped in strict mode
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
 
-    def test_get_session_chats(self, mgr):
+    def test_get_session_chats_strict(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi-strict", session_path=d)
+            sess = mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "2026-01-01T00:00:00Z"
+            )
+            mgr.append_response(
+                sess, {"role": "assistant", "content": "A1"}, "2026-01-01T00:00:01Z"
+            )
+            chats = mgr.get_session_chats()
+            assert len(chats) == 1
+            assert chats[0]["remarks"]["incomplete"] is False
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_get_session_chats_multi_no_remarks(self, mgr):
         sess = mgr.create_session(
             [{"role": "user", "content": "Q1"}], "2026-01-01T00:00:00Z"
         )
@@ -292,7 +389,7 @@ class TestSessionManager:
         )
         chats = mgr.get_session_chats()
         assert len(chats) == 1
-        assert chats[0]["remarks"]["incomplete"] is False
+        assert "remarks" not in chats[0]
 
     def test_append_response_single_mode_no_timestamp(self):
         mgr = SessionManager("/tmp", "s", "single")

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import time
 from datetime import datetime
 
 import yaml
@@ -114,6 +115,42 @@ def _yaml_value(key, value):
     return value
 
 
+def _parse_ports(ports_str: str) -> list[int]:
+    """Parse a port range/set string.
+
+    Supported formats:
+      - Single port:  ``8030``
+      - Range:        ``8030-8037``
+      - List:         ``8030,8031,8032``
+      - Mixed:        ``8030-8032,8035,8037-8039``
+
+    Returns a sorted list of unique ports.
+    """
+    ports: set[int] = set()
+    for part in ports_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start = int(start_s.strip())
+            end = int(end_s.strip())
+            if start > end:
+                raise ValueError(f"Invalid port range: {start}-{end}")
+            if start < 1 or end > 65535:
+                raise ValueError(f"Port out of valid range (1-65535): {start}-{end}")
+            for p in range(start, end + 1):
+                ports.add(p)
+        else:
+            p = int(part)
+            if p < 1 or p > 65535:
+                raise ValueError(f"Port out of valid range (1-65535): {p}")
+            ports.add(p)
+    if not ports:
+        raise ValueError(f"No ports parsed from: {ports_str!r}")
+    return sorted(ports)
+
+
 def parse_args():
     # -- CLI parser -------------------------------------------------------
     parser = argparse.ArgumentParser(
@@ -121,12 +158,15 @@ def parse_args():
     )
     parser.add_argument("--host", default=_UNSET, help="Proxy listen host")
     parser.add_argument("--port", default=_UNSET, type=int, help="Proxy listen port")
+    parser.add_argument("--ports", default=_UNSET,
+                        help="Comma-separated port list or range (e.g. 8030,8031 or 8030-8037). "
+                             "Launches one proxy process per port with the same config.")
     parser.add_argument("--base-url", default=_UNSET, help="Upstream LLM service base URL")
     parser.add_argument("--api-key", default=_UNSET, help="Upstream API key")
     parser.add_argument("--log-folder", default=_UNSET, help="Log and output directory")
     parser.add_argument("--log-chatml", default=_UNSET,
-                        choices=["none", "multi", "single"],
-                        help="ChatML recording mode: none, multi, single")
+                        choices=["none", "multi", "multi-strict", "single"],
+                        help="ChatML recording mode: none, multi, multi-strict, single")
     parser.add_argument("--session-name", default=_UNSET, help="Initial session name")
     parser.add_argument("--session-path", default=_UNSET,
                         help="ChatML output path (defaults to --log-folder)")
@@ -142,8 +182,22 @@ def parse_args():
                         help="Name of a YAML config group to load (e.g. DEEPSEEK)")
     parser.add_argument("--config-file", default=None,
                         help="Path to YAML config file (default: llm_proxy.yaml in CWD or XDG)")
+    parser.add_argument("--no-save-config", default=False, action="store_true",
+                        help="Skip writing RECENT config back to YAML (used internally for --ports children)")
 
     cli_args = parser.parse_args()
+
+    # -- Validate mutual exclusivity --------------------------------------
+    if cli_args.ports is not _UNSET and cli_args.port is not _UNSET:
+        parser.error("--ports and --port are mutually exclusive")
+
+    # Parse --ports into a list early (will be attached to resolved later)
+    _ports_list: list[int] | None = None
+    if cli_args.ports is not _UNSET:
+        try:
+            _ports_list = _parse_ports(cli_args.ports)
+        except ValueError as e:
+            parser.error(str(e))
 
     # -- Locate config file -----------------------------------------------
     if cli_args.config_file:
@@ -204,6 +258,8 @@ def parse_args():
 
     resolved["_defaults"] = _base
     resolved["_config_path"] = config_path
+    resolved["_ports_list"] = _ports_list
+    resolved["no_save_config"] = cli_args.no_save_config
 
     preset_name_str = preset_name if preset_name else None
     resolved["preset"] = preset_name_str
@@ -219,7 +275,8 @@ def parse_args():
         parser.error("--base-url is required (set via CLI, YAML DEFAULT, or --preset)")
 
     # -- Write back YAML --------------------------------------------------
-    _save_config(resolved, session_explicit)
+    if not resolved["no_save_config"]:
+        _save_config(resolved, session_explicit)
 
     # Return a namespace for backward compatibility
     return argparse.Namespace(**resolved)
@@ -270,7 +327,26 @@ def _save_config(args, session_explicit):
         else:
             del yaml_data[group_name]
 
-    # Write
+    # Write (with file lock to prevent concurrent write races)
     os.makedirs(os.path.dirname(write_path) or ".", exist_ok=True)
-    with open(write_path, "w") as f:
-        yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    lock_path = write_path + ".lock"
+    # Simple lock-file acquisition with timeout
+    deadline = time.monotonic() + 5.0  # 5 s timeout
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                # Stale lock or extreme contention — write anyway
+                break
+            time.sleep(0.05)
+    try:
+        with open(write_path, "w") as f:
+            yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    finally:
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass

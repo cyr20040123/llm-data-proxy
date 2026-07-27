@@ -3,6 +3,8 @@
 import logging
 import os
 import signal
+import subprocess
+import sys
 from datetime import datetime
 
 import httpx
@@ -30,6 +32,85 @@ def setup_logging(log_folder):
     return logging.getLogger("llm_proxy")
 
 
+def _build_child_args(port: int, args) -> list[str]:
+    """Build CLI argument list for a child process on *port*.
+
+    Forwards all original CLI args except ``--ports`` / ``--port`` (and their
+    values), then appends ``--port <port>``, a port-isolated ``--log-folder``,
+    and ``--no-save-config``.
+    """
+    child_argv = [sys.executable, "-m", "llmdataproxy"]
+
+    # Filter original argv — drop args that the parent overrides per child
+    argv = sys.argv[1:]
+    skip_next = False
+    _OVERRIDE_ARGS = {"--ports", "--port", "--log-folder", "--no-save-config"}
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _OVERRIDE_ARGS:
+            skip_next = True  # next token is the value → skip it too
+            continue
+        if any(arg.startswith(f"{a}=") for a in _OVERRIDE_ARGS):
+            continue
+        child_argv.append(arg)
+
+    # Port-specific overrides
+    child_argv.extend(["--port", str(port)])
+    child_argv.extend(["--log-folder", os.path.join(args.log_folder, f"p{port}")])
+    child_argv.append("--no-save-config")
+
+    return child_argv
+
+
+def _run_multi_port(ports: list[int], args, logger: logging.Logger) -> None:
+    """Spawn one subprocess per port, wait, and forward signals.
+
+    - First  SIGINT / SIGTERM  → forwarded to children (graceful shutdown).
+    - Second SIGINT / SIGTERM  → force-kill children and exit immediately.
+    """
+    children: list[tuple[int, subprocess.Popen]] = []
+    for port in ports:
+        cmd = _build_child_args(port, args)
+        logger.info("spawning child on port %d: %s", port, " ".join(cmd))
+        proc = subprocess.Popen(cmd)
+        children.append((port, proc))
+
+    logger.info("all %d children started (parent pid=%d), waiting...",
+                len(children), os.getpid())
+
+    # Signal-handling state — first signal = graceful, second = force
+    signalled = False
+
+    def _handle_signal(signum, frame):
+        nonlocal signalled
+        if signalled:
+            logger.warning("second signal received — force-killing all children")
+            for port, proc in children:
+                if proc.poll() is None:
+                    logger.warning("killing child on port %d", port)
+                    proc.kill()
+            os._exit(1)
+        signalled = True
+        logger.info("received signal %d, forwarding to children for graceful shutdown...",
+                    signum)
+        for port, proc in children:
+            if proc.poll() is None:
+                proc.send_signal(signum)
+
+    # Replace parent signal handlers
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    # Wait for all children to exit
+    for port, proc in children:
+        rc = proc.wait()
+        logger.info("child on port %d exited with code %d", port, rc)
+
+    logger.info("all children exited")
+
+
 def main():
     args = parse_args()
     logger = setup_logging(args.log_folder)
@@ -46,6 +127,15 @@ def main():
         marker = "*" if base and val != base.get(key) else " "
         parts.append(f"{marker}{key}={display}")
     logger.info("config: %s", "  ".join(parts))
+
+    # --- Multi-port mode (--ports) ---------------------------------------
+    ports_list = getattr(args, "_ports_list", None)
+    if ports_list:
+        logger.info("multi-port mode: %d ports (%s)",
+                    len(ports_list),
+                    ", ".join(str(p) for p in ports_list))
+        _run_multi_port(ports_list, args, logger)
+        return
 
     session_mgr = SessionManager(args.log_folder, args.session_name, args.log_chatml,
                                  args.session_path, rl_enabled=args.rl)
