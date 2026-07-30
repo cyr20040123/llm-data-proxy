@@ -265,7 +265,10 @@ class SessionManager:
             # Remove timestamp from each message
             clean = [{k: v for k, v in m.items() if k != "timestamp"}
                      for m in msgs]
-            entries.append({"messages": clean})
+            entry = {"messages": clean}
+            if sess.get("tools"):
+                entry["tools"] = sess["tools"]
+            entries.append(entry)
         filepath = os.path.join(output_dir, f"{self.session_name}.json")
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)

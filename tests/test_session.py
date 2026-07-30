@@ -329,7 +329,8 @@ class TestSessionManager:
         try:
             mgr = SessionManager(d, "test_sess", "single", session_path=d)
             mgr.create_session(
-                [{"role": "user", "content": "Q1"}], "ts"
+                [{"role": "user", "content": "Q1"}], "ts",
+                tools=[{"type": "function", "function": {"name": "get_weather"}}],
             )
             mgr.append_response(
                 mgr.sessions[0],
@@ -343,6 +344,27 @@ class TestSessionManager:
                 data = json.load(f)
             assert isinstance(data, list)
             assert "timestamp" not in data[0]["messages"][0]
+            # tools should be preserved in single mode output
+            assert "tools" in data[0]
+            assert data[0]["tools"][0]["function"]["name"] == "get_weather"
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dump_single_mode_no_tools(self):
+        """Single mode: sessions without tools should not have tools key in output."""
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "single", session_path=d)
+            mgr.create_session(
+                [{"role": "user", "content": "Q1"}], "ts"
+            )
+            output_dir = mgr.dump_all()
+            files = [f for f in os.listdir(output_dir) if f.endswith(".json") and not f.endswith(".chatml.json")]
+            assert len(files) == 1
+            with open(os.path.join(output_dir, files[0])) as f:
+                data = json.load(f)
+            assert "tools" not in data[0]
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
