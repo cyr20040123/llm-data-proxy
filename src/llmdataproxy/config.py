@@ -27,13 +27,14 @@ _HARD_DEFAULTS = {
     "default_model": None,
     "override_model": False,
     "parse_arguments": False,
+    "auto_retry": "429,500,503",
 }
 
 # Fields persisted to YAML RECENT (in order)
 _CONFIG_FIELDS = [
     "host", "port", "base_url", "api_key", "log_folder", "log_chatml",
     "session_name", "session_path", "temperature", "rl", "default_model",
-    "override_model", "parse_arguments",
+    "override_model", "parse_arguments", "auto_retry",
 ]
 
 # Fields that are always written to RECENT (even if matching DEFAULT)
@@ -152,6 +153,23 @@ def _parse_ports(ports_str: str) -> list[int]:
     return sorted(ports)
 
 
+def _parse_auto_retry_codes(raw: str) -> set[int] | None:
+    """Parse ``--auto-retry`` value into a set of status codes.
+
+    Returns ``None`` when retry should be disabled entirely
+    (empty string or the literal ``"none"``).
+    """
+    if not raw or raw.strip().lower() == "none":
+        return None
+    codes: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        codes.add(int(part))
+    return codes or None
+
+
 def parse_args():
     # -- CLI parser -------------------------------------------------------
     parser = argparse.ArgumentParser(
@@ -182,6 +200,11 @@ def parse_args():
     parser.add_argument("--parse-arguments", default=None, action="store_true",
                         help="Parse tool_calls arguments from JSON string to dict "
                              "(default: keep as JSON string)")
+    parser.add_argument("--auto-retry", default=_UNSET,
+                        help="Comma-separated HTTP status codes to retry on upstream errors "
+                             "(e.g. '429,500,503').  Pass 'none' or empty to disable. "
+                             "Network errors are always retried when auto-retry is enabled. "
+                             "(default: 429,500,503)")
     parser.add_argument("--preset", default=_UNSET,
                         help="Name of a YAML config group to load (e.g. DEEPSEEK)")
     parser.add_argument("--config-file", default=None,
@@ -267,6 +290,9 @@ def parse_args():
 
     preset_name_str = preset_name if preset_name else None
     resolved["preset"] = preset_name_str
+
+    # Parse auto-retry status codes
+    resolved["_auto_retry_codes"] = _parse_auto_retry_codes(resolved["auto_retry"])
 
     # Auto session name if not set
     if not resolved["session_name"]:

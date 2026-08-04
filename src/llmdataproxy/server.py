@@ -1,5 +1,6 @@
 """FastAPI app factory and route handlers for the LLM proxy."""
 
+import asyncio
 import copy
 import json
 import logging
@@ -12,6 +13,82 @@ from llmdataproxy.session import SessionManager, _now_iso
 from llmdataproxy.sse import reconstruct_chat_response, reconstruct_completion_response
 
 logger = logging.getLogger("llm_proxy")
+
+# ---------------------------------------------------------------------------
+# Retry configuration for upstream transient errors
+# ---------------------------------------------------------------------------
+_RETRY_DELAYS = [3, 3, 5, 5, 10]  # seconds between retries (max 5 retries)
+
+
+async def _retry_upstream(request_coro, url: str, retry_codes: set[int] | None):
+    """Execute *request_coro()* with retry-on-backoff for transient errors.
+
+    Retries on:
+      - Network errors (ConnectError, TimeoutException, etc.) — always retryable.
+      - HTTP status codes in *retry_codes*.
+
+    If *retry_codes* is ``None`` or empty, retry is disabled entirely and the
+    request is made exactly once.
+
+    Delays: 3, 3, 5, 5, 10 seconds (max 5 retries).
+
+    Returns the result of *request_coro()* on success.
+
+    Raises:
+        httpx.HTTPError: If all retries are exhausted or the error is not retryable.
+    """
+    if not retry_codes:
+        return await request_coro()
+
+    for attempt, delay in enumerate(_RETRY_DELAYS):
+        try:
+            return await request_coro()
+        except httpx.HTTPError as e:
+            if isinstance(e, httpx.HTTPStatusError):
+                status = e.response.status_code
+                if status not in retry_codes:
+                    raise
+                reason = str(status)
+            else:
+                # Network error — always retryable
+                reason = type(e).__name__
+
+            if attempt == len(_RETRY_DELAYS) - 1:
+                raise
+
+            logger.warning(
+                "upstream %s for %s (attempt %d/%d), retrying in %ds…",
+                reason, url, attempt + 1, len(_RETRY_DELAYS), delay,
+            )
+            await asyncio.sleep(delay)
+
+
+# ---------------------------------------------------------------------------
+# Common upstream HTTP helpers (used together with _retry_upstream)
+# ---------------------------------------------------------------------------
+async def _post_json(url: str, headers: dict, body: dict):
+    """POST JSON to upstream; raise on non-2xx.  Non-streaming only."""
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(url, json=body, headers=headers)
+        resp.raise_for_status()
+        return resp
+
+
+async def _post_stream(url: str, headers: dict, body: dict):
+    """POST JSON to upstream in streaming mode; return (client, resp).
+
+    The caller MUST close *client* when done consuming the stream."""
+    client = httpx.AsyncClient(timeout=300)
+    try:
+        resp = await client.send(
+            client.build_request("POST", url, json=body, headers=headers),
+            stream=True,
+        )
+        resp.raise_for_status()
+        return client, resp
+    except Exception:
+        await client.aclose()
+        raise
 
 
 def _build_upstream_headers(request: Request, api_key: str) -> dict:
@@ -79,7 +156,8 @@ def _inject_hint(messages: list, hint_content: str | None) -> None:
 def create_app(base_url: str, api_key: str, session_manager: SessionManager,
                temperature_arg: float = -1.0,
                default_model: str | None = None,
-               override_model: bool = False) -> FastAPI:
+               override_model: bool = False,
+               auto_retry_codes: set[int] | None = None) -> FastAPI:
     app = FastAPI()
     upstream = base_url.rstrip("/")
     temperature_default = temperature_arg  # capture for handler closures
@@ -162,19 +240,20 @@ def create_app(base_url: str, api_key: str, session_manager: SessionManager,
     async def chat_completions(request: Request):
         return await _handle_chat_completions(request, upstream, api_key, session_manager,
                                               temperature_default, model_override,
-                                              default_model)
+                                              default_model, retry_codes=auto_retry_codes)
 
     # --- /v1/completions ---
     @app.post("/v1/completions")
     async def completions(request: Request):
         return await _handle_completions(request, upstream, api_key, session_manager,
                                          temperature_default, model_override,
-                                         default_model)
+                                         default_model, retry_codes=auto_retry_codes)
 
     # --- catch-all ---
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
     async def catchall(request: Request, path: str):
-        return await _handle_catchall(request, upstream, api_key, path)
+        return await _handle_catchall(request, upstream, api_key, path,
+                                     retry_codes=auto_retry_codes)
 
     return app
 
@@ -186,7 +265,8 @@ async def _handle_chat_completions(request: Request, upstream: str, api_key: str
                                   session_mgr: SessionManager,
                                   temperature_default: float = -1.0,
                                   model_override: list | None = None,
-                                  default_model: str | None = None):
+                                  default_model: str | None = None,
+                                  retry_codes: set[int] | None = None):
     body = await request.json()
     _inject_temperature(body, temperature_default)
     # --- model handling ---
@@ -227,9 +307,9 @@ async def _handle_chat_completions(request: Request, upstream: str, api_key: str
 
     try:
         if is_stream:
-            return await _stream_forward(url, headers, body, session_mgr, session)
+            return await _stream_forward(url, headers, body, session_mgr, session, retry_codes)
         else:
-            return await _nonstream_forward(url, headers, body, session_mgr, session)
+            return await _nonstream_forward(url, headers, body, session_mgr, session, retry_codes)
     except httpx.HTTPStatusError as e:
         try:
             await e.response.aread()
@@ -254,7 +334,8 @@ async def _handle_completions(request: Request, upstream: str, api_key: str,
                               session_mgr: SessionManager,
                               temperature_default: float = -1.0,
                               model_override: list | None = None,
-                              default_model: str | None = None):
+                              default_model: str | None = None,
+                              retry_codes: set[int] | None = None):
     body = await request.json()
     _inject_temperature(body, temperature_default)
     # --- model handling ---
@@ -291,9 +372,9 @@ async def _handle_completions(request: Request, upstream: str, api_key: str,
 
     try:
         if is_stream:
-            return await _stream_forward_completions(url, headers, body, session_mgr, session)
+            return await _stream_forward_completions(url, headers, body, session_mgr, session, retry_codes)
         else:
-            return await _nonstream_forward_completions(url, headers, body, session_mgr, session)
+            return await _nonstream_forward_completions(url, headers, body, session_mgr, session, retry_codes)
     except httpx.HTTPStatusError as e:
         try:
             await e.response.aread()
@@ -329,24 +410,22 @@ def _find_completion_session(session_mgr: SessionManager, prompt: str):
 # Non-streaming helpers
 # ---------------------------------------------------------------------------
 async def _nonstream_forward(url: str, headers: dict,
-                             body: dict, session_mgr: SessionManager, session: dict):
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        resp_ts = _now_iso()
-        resp_body = resp.json()
+                             body: dict, session_mgr: SessionManager, session: dict,
+                             retry_codes: set[int] | None = None):
+    resp = await _retry_upstream(lambda: _post_json(url, headers, body), url, retry_codes)
+    resp_ts = _now_iso()
+    resp_body = resp.json()
     _record_chat_response(session_mgr, session, resp_body, resp_ts)
     logger.info("chat non-stream %d bytes", len(resp.content))
     return JSONResponse(content=resp_body, status_code=resp.status_code)
 
 
 async def _nonstream_forward_completions(url: str, headers: dict,
-                                         body: dict, session_mgr: SessionManager, session: dict):
-    async with httpx.AsyncClient(timeout=300) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        resp_ts = _now_iso()
-        resp_body = resp.json()
+                                         body: dict, session_mgr: SessionManager, session: dict,
+                                         retry_codes: set[int] | None = None):
+    resp = await _retry_upstream(lambda: _post_json(url, headers, body), url, retry_codes)
+    resp_ts = _now_iso()
+    resp_body = resp.json()
     _record_completion_response(session_mgr, session, resp_body, resp_ts)
     logger.info("completions non-stream %d bytes", len(resp.content))
     return JSONResponse(content=resp_body, status_code=resp.status_code)
@@ -356,19 +435,11 @@ async def _nonstream_forward_completions(url: str, headers: dict,
 # Streaming helpers
 # ---------------------------------------------------------------------------
 async def _stream_forward(url: str, headers: dict,
-                          body: dict, session_mgr: SessionManager, session: dict):
+                          body: dict, session_mgr: SessionManager, session: dict,
+                          retry_codes: set[int] | None = None):
     chunks: list[bytes] = []
 
-    client = httpx.AsyncClient(timeout=300)
-    resp = await client.send(
-        client.build_request("POST", url, json=body, headers=headers),
-        stream=True,
-    )
-    try:
-        resp.raise_for_status()
-    except Exception:
-        await client.aclose()
-        raise
+    client, resp = await _retry_upstream(lambda: _post_stream(url, headers, body), url, retry_codes)
 
     resp_ce = resp.headers.get("content-encoding", "")
 
@@ -400,19 +471,11 @@ async def _stream_forward(url: str, headers: dict,
 
 
 async def _stream_forward_completions(url: str, headers: dict,
-                                      body: dict, session_mgr: SessionManager, session: dict):
+                                      body: dict, session_mgr: SessionManager, session: dict,
+                                      retry_codes: set[int] | None = None):
     chunks: list[bytes] = []
 
-    client = httpx.AsyncClient(timeout=300)
-    resp = await client.send(
-        client.build_request("POST", url, json=body, headers=headers),
-        stream=True,
-    )
-    try:
-        resp.raise_for_status()
-    except Exception:
-        await client.aclose()
-        raise
+    client, resp = await _retry_upstream(lambda: _post_stream(url, headers, body), url, retry_codes)
 
     resp_ce = resp.headers.get("content-encoding", "")
 
@@ -497,7 +560,8 @@ def _record_completion_response(session_mgr: SessionManager, session: dict,
 # ---------------------------------------------------------------------------
 # Catch-all
 # ---------------------------------------------------------------------------
-async def _handle_catchall(request: Request, upstream: str, api_key: str, path: str):
+async def _handle_catchall(request: Request, upstream: str, api_key: str, path: str,
+                          retry_codes: set[int] | None = None):
     headers = _build_upstream_headers(request, api_key)
     # When upstream base URL already contains /v1 (auto-detected), strip the
     # /v1 prefix from the incoming path to avoid doubling it: /v1/v1/models
@@ -512,12 +576,17 @@ async def _handle_catchall(request: Request, upstream: str, api_key: str, path: 
         body = await request.body()
 
     logger.info("catchall %s %s", request.method, url)
-    try:
+
+    async def _do_request():
         async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.request(
                 method=request.method, url=url, content=body, headers=headers
             )
             resp.raise_for_status()
+            return resp
+
+    try:
+        resp = await _retry_upstream(_do_request, url, retry_codes)
         return Response(content=resp.content, status_code=resp.status_code,
                         headers=dict(resp.headers))
     except httpx.HTTPStatusError as e:

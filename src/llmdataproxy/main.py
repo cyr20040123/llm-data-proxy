@@ -174,7 +174,8 @@ def main():
         logger.info("default-model set to '%s' (from config)", default_model)
 
     app = create_app(args.base_url, args.api_key, session_mgr, args.temperature,
-                     default_model=default_model, override_model=args.override_model)
+                     default_model=default_model, override_model=args.override_model,
+                     auto_retry_codes=args._auto_retry_codes)
     app.state.available_models = available_models
 
     # Graceful shutdown — dump sessions

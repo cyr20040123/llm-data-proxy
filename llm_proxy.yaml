@@ -9,3 +9,4 @@ DEFAULT:
   parse-arguments: false
   temperature: -1.0
   default-model: null
+  auto-retry: 429,500,503
