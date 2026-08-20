@@ -453,15 +453,29 @@ async def _stream_forward(url: str, headers: dict,
             await client.aclose()
 
     async def wrapper():
-        async for chunk in generator():
-            yield chunk
-        resp_ts = _now_iso()
-        raw = b"".join(chunks)
-        decompressed = _decompress_body(raw, resp_ce)
-        reconstructed = reconstruct_chat_response([decompressed])
-        if reconstructed:
-            _record_chat_response(session_mgr, session, reconstructed, resp_ts)
-        logger.info("chat stream %d bytes (%d chunks)", sum(len(c) for c in chunks), len(chunks))
+        cancelled = False
+        try:
+            async for chunk in generator():
+                yield chunk
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            # 即使客户端（runtime 容器）在流未完全消费时断开——例如 agent 收到最终
+            # 回复后立即退出——也尽力用已缓冲的 chunks 重建并记录响应，避免教师
+            # 轨迹缺最终 assistant 消息。同步操作，取消路径下安全。
+            try:
+                resp_ts = _now_iso()
+                raw = b"".join(chunks)
+                decompressed = _decompress_body(raw, resp_ce)
+                reconstructed = reconstruct_chat_response([decompressed])
+                if reconstructed:
+                    _record_chat_response(session_mgr, session, reconstructed, resp_ts)
+                logger.info("chat stream %d bytes (%d chunks)%s",
+                            sum(len(c) for c in chunks), len(chunks),
+                            " [client-disconnected, best-effort record]" if cancelled else "")
+            except Exception:
+                logger.exception("best-effort chat response record failed")
 
     resp_headers = {}
     if resp_ce:
@@ -489,15 +503,27 @@ async def _stream_forward_completions(url: str, headers: dict,
             await client.aclose()
 
     async def wrapper():
-        async for chunk in generator():
-            yield chunk
-        resp_ts = _now_iso()
-        raw = b"".join(chunks)
-        decompressed = _decompress_body(raw, resp_ce)
-        reconstructed = reconstruct_completion_response([decompressed])
-        if reconstructed:
-            _record_completion_response(session_mgr, session, reconstructed, resp_ts)
-        logger.info("completions stream %d bytes (%d chunks)", sum(len(c) for c in chunks), len(chunks))
+        cancelled = False
+        try:
+            async for chunk in generator():
+                yield chunk
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            # 同 chat 流：客户端提前断开时也尽力记录已缓冲的响应。
+            try:
+                resp_ts = _now_iso()
+                raw = b"".join(chunks)
+                decompressed = _decompress_body(raw, resp_ce)
+                reconstructed = reconstruct_completion_response([decompressed])
+                if reconstructed:
+                    _record_completion_response(session_mgr, session, reconstructed, resp_ts)
+                logger.info("completions stream %d bytes (%d chunks)%s",
+                            sum(len(c) for c in chunks), len(chunks),
+                            " [client-disconnected, best-effort record]" if cancelled else "")
+            except Exception:
+                logger.exception("best-effort completion response record failed")
 
     resp_headers = {}
     if resp_ce:

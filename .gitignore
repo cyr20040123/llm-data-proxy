@@ -29,3 +29,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+llm_proxy.yaml
+tmp
