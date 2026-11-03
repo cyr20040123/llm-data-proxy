@@ -189,7 +189,9 @@ class TestProxyEndpoints:
         with open(filepath) as f:
             data = json.load(f)
         assert "messages" in data
-        assert "remarks" in data
+        # The proxy fixture runs in "multi" mode, which never truncates and
+        # never adds "remarks"; only "multi-strict" mode does.
+        assert "remarks" not in data
         assert len(data["messages"]) >= 2
 
     def test_override_model(self, test_client):
