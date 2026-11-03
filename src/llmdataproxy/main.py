@@ -44,10 +44,13 @@ def _build_child_args(port: int, args) -> list[str]:
     # Filter original argv — drop args that the parent overrides per child
     argv = sys.argv[1:]
     skip_next = False
-    _OVERRIDE_ARGS = {"--ports", "--port", "--log-folder", "--no-save-config"}
+    _OVERRIDE_ARGS = {"--ports", "--port", "--log-folder", "--no-save-config",
+                      "--traj-viewer-port"}
     for arg in argv:
         if skip_next:
             skip_next = False
+            continue
+        if arg == "--traj-viewer":
             continue
         if arg in _OVERRIDE_ARGS:
             skip_next = True  # next token is the value → skip it too
@@ -131,6 +134,8 @@ def main():
     # --- Multi-port mode (--ports) ---------------------------------------
     ports_list = getattr(args, "_ports_list", None)
     if ports_list:
+        if getattr(args, "traj_viewer", False):
+            logger.warning("--traj-viewer is only supported in single-port mode; ignoring")
         logger.info("multi-port mode: %d ports (%s)",
                     len(ports_list),
                     ", ".join(str(p) for p in ports_list))
@@ -139,7 +144,9 @@ def main():
 
     session_mgr = SessionManager(args.log_folder, args.session_name, args.log_chatml,
                                  args.session_path, rl_enabled=args.rl,
-                                 parse_arguments=args.parse_arguments)
+                                 parse_arguments=args.parse_arguments,
+                                 image_mode=args.image_mode,
+                                 image_folder=args.image_folder)
 
     # --- fetch available models from upstream ---
     available_models = []
@@ -191,12 +198,23 @@ def main():
     signal.signal(signal.SIGINT, _sig_handler)
     signal.signal(signal.SIGTERM, _sig_handler)
 
+    viewer_server = None
+    if getattr(args, "traj_viewer", False):
+        from .viewer import start_viewer
+        viewer_server, _viewer_port = start_viewer(
+            session_mgr, args.traj_viewer_port, logger,
+            root=args.traj_viewer_root or None)
+
     logger.info("starting llm_proxy on %s:%d, upstream=%s, log_chatml=%s, log_folder=%s",
                 args.host, args.port, args.base_url, args.log_chatml, args.log_folder)
     print(f"Initial session name: {args.session_name}")
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info",
-                access_log=False)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                    access_log=False)
+    finally:
+        if viewer_server is not None:
+            viewer_server.should_exit = True
 
 
 if __name__ == "__main__":

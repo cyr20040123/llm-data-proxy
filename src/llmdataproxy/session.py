@@ -1,6 +1,9 @@
+import base64
+import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 logger = logging.getLogger("llm_proxy")
@@ -52,10 +55,46 @@ def _normalize_msg_arguments(msg: dict) -> dict:
 _MATCH_FIELDS = {"role", "content", "tool_calls", "tool_call_id", "name"}
 
 
+def _canonical_content(content):
+    """Normalize message content for prefix matching.
+
+    Upstream responses use a plain string, while clients often echo the same
+    text back as a list of content parts (e.g. ``[{"type": "text", ...}]``).
+    Treat both forms as equivalent; image URLs are compared by hash so that
+    matching stays cheap for large base64 screenshots.
+    """
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content != "" else None
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                parts.append({"type": "raw", "raw": str(part)})
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                parts.append({"type": "text", "text": part.get("text", "")})
+            elif ptype == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                parts.append({
+                    "type": "image_url",
+                    "sha1": hashlib.sha1(url.encode("utf-8")).hexdigest(),
+                })
+            else:
+                parts.append({
+                    "type": ptype or "unknown",
+                    "raw": json.dumps(part, sort_keys=True, ensure_ascii=False),
+                })
+        return parts or None
+    return [{"type": "raw", "raw": str(content)}]
+
+
 def _canonical(msg):
     """Serialize a message dict to a canonical JSON string for comparison.
-    Strips 'timestamp' and non-standard fields, normalizes tool_calls.
-    Null values, empty strings, and empty tool_calls are omitted.
+    Strips 'timestamp' and non-standard fields, normalizes content and
+    tool_calls.  Null values, empty strings, and empty tool_calls are omitted.
     None and '' are treated as equivalent so that stored messages (which
     may have content=None after reconstruction) match client messages
     (which may send content='')."""
@@ -68,6 +107,10 @@ def _canonical(msg):
         if k == "tool_calls":
             n = _normalize_tool_calls(v)
             if n:
+                d[k] = n
+        elif k == "content":
+            n = _canonical_content(v)
+            if n is not None:
                 d[k] = n
         elif v is not None and v != "":
             d[k] = v
@@ -88,15 +131,28 @@ def _now_iso():
 
 class SessionManager:
     def __init__(self, log_folder, session_name, mode, session_path="",
-                 rl_enabled=False, parse_arguments=False):
+                 rl_enabled=False, parse_arguments=False,
+                 image_mode="inline", image_folder=""):
         self.log_folder = log_folder
         self.session_name = session_name
         self.mode = mode  # "none", "multi", "multi-strict", "single"
         self.session_path = session_path or log_folder
         self.rl_enabled = rl_enabled
         self.parse_arguments = parse_arguments
+        self.image_mode = image_mode  # "inline" or "files"
+        self.image_folder = image_folder
         self.sessions = []
         self.hint_content: str | None = None
+        self.seen_session_paths = []
+        self.remember_session_path(self.session_path)
+
+    def remember_session_path(self, path):
+        """Remember a ChatML output directory (for the viewer's directory list)."""
+        if not path:
+            return
+        normalized = os.path.abspath(os.path.expanduser(path))
+        if normalized not in self.seen_session_paths:
+            self.seen_session_paths.append(normalized)
 
     @property
     def enabled(self):
@@ -157,6 +213,33 @@ class SessionManager:
                 if system_mismatch:
                     logger.warning("session matched with different system prompt")
                 return sess, ri
+
+        # Fallback for clients that only resend a sliding window of recent
+        # turns (e.g. OSWorld's max_trajectory_length).  The request no longer
+        # contains the whole earlier conversation, but its beginning overlaps
+        # the tail of a stored session; append only the unseen tail.
+        req = [(i, m) for i, m in enumerate(request_messages)
+               if not _is_hint_message(m) and m.get("role") != "system"]
+        req_msgs = [m for _, m in req]
+        if len(req_msgs) >= 2:
+            best = None  # (overlap_len, session, match_len)
+            for sess in self.sessions:
+                sess_msgs = [m for m in sess["messages"]
+                             if not _is_hint_message(m) and m.get("role") != "system"]
+                if len(sess_msgs) < 2:
+                    continue
+                max_l = min(len(sess_msgs), len(req_msgs))
+                for l in range(max_l, 1, -1):
+                    if all(_canonical(sess_msgs[-l + k]) == _canonical(req_msgs[k])
+                           for k in range(l)):
+                        match_len = req[l][0] if l < len(req_msgs) else len(request_messages)
+                        if best is None or l > best[0]:
+                            best = (l, sess, match_len)
+                        break
+            if best is not None:
+                logger.info("sliding-window session match: %d overlapping messages",
+                            best[0])
+                return best[1], best[2]
         return None, 0
 
     # ------------------------------------------------------------------
@@ -269,6 +352,10 @@ class SessionManager:
             if sess.get("tools"):
                 entry["tools"] = sess["tools"]
             entries.append(entry)
+        if self.image_mode == "files":
+            for i, entry in enumerate(entries):
+                entry["messages"] = self._externalize_images(
+                    entry["messages"], output_dir, f"{self.session_name}_e{i}")
         filepath = os.path.join(output_dir, f"{self.session_name}.json")
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(entries, f, ensure_ascii=False, indent=2)
@@ -289,9 +376,71 @@ class SessionManager:
             output["tools"] = sess["tools"]
 
         out = output_dir or self.session_path or self.log_folder
+        if self.image_mode == "files":
+            output["messages"] = self._externalize_images(
+                chatml_msgs, out, f"{self.session_name}{suffix}")
         filepath = os.path.join(out, f"{self.session_name}{suffix}.chatml.json")
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
+
+    def _externalize_images(self, messages, output_dir, prefix):
+        """Return a copy of *messages* with base64 images written to files.
+
+        Each ``image_url`` data URL is decoded into ``image_folder`` (default
+        ``<output_dir>/images``) and replaced by a path relative to the JSON
+        file.  Non-data URLs are left untouched.
+        """
+        img_dir = self.image_folder or os.path.join(output_dir, "images")
+        if not os.path.isabs(img_dir):
+            img_dir = os.path.join(output_dir, img_dir)
+        os.makedirs(img_dir, exist_ok=True)
+        safe_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "_", prefix)
+        ext_map = {
+            "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg",
+            "image/webp": "webp", "image/gif": "gif", "image/bmp": "bmp",
+            "image/svg+xml": "svg",
+        }
+
+        out_msgs = []
+        for mi, msg in enumerate(messages):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                out_msgs.append(msg)
+                continue
+            new_parts = []
+            for pi, part in enumerate(content):
+                if not (isinstance(part, dict) and part.get("type") == "image_url"):
+                    new_parts.append(part)
+                    continue
+                image_url = part.get("image_url")
+                url = image_url.get("url") if isinstance(image_url, dict) else image_url
+                if not (isinstance(url, str) and url.startswith("data:")):
+                    new_parts.append(part)
+                    continue
+                match = re.match(r"data:(image/[^;]+);base64,(.*)", url, re.DOTALL)
+                if not match:
+                    new_parts.append(part)
+                    continue
+                mime, b64 = match.group(1), match.group(2)
+                try:
+                    raw = base64.b64decode(b64)
+                except Exception:
+                    new_parts.append(part)
+                    continue
+                ext = ext_map.get(mime, mime.split("/")[-1].split("+")[0] or "img")
+                digest = hashlib.sha1(raw).hexdigest()[:12]
+                filename = f"{safe_prefix}_m{mi}_p{pi}_{digest}.{ext}"
+                filepath = os.path.join(img_dir, filename)
+                if not os.path.exists(filepath):
+                    with open(filepath, "wb") as f:
+                        f.write(raw)
+                rel_path = os.path.relpath(filepath, output_dir)
+                if isinstance(image_url, dict):
+                    new_parts.append({**part, "image_url": {**image_url, "url": rel_path}})
+                else:
+                    new_parts.append({**part, "image_url": rel_path})
+            out_msgs.append({**msg, "content": new_parts})
+        return out_msgs
 
     def _build_chatml(self, messages, strict=True):
         """Build ChatML output from messages.

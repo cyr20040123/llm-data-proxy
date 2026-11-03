@@ -22,6 +22,11 @@ _HARD_DEFAULTS = {
     "log_chatml": "none",
     "session_name": None,
     "session_path": "",
+    "image_mode": "inline",
+    "image_folder": "",
+    "traj_viewer": False,
+    "traj_viewer_port": 8330,
+    "traj_viewer_root": "",
     "temperature": -1.0,
     "rl": False,
     "default_model": None,
@@ -33,8 +38,10 @@ _HARD_DEFAULTS = {
 # Fields persisted to YAML RECENT (in order)
 _CONFIG_FIELDS = [
     "host", "port", "base_url", "api_key", "log_folder", "log_chatml",
-    "session_name", "session_path", "temperature", "rl", "default_model",
-    "override_model", "parse_arguments", "auto_retry",
+    "session_name", "session_path", "image_mode", "image_folder",
+    "traj_viewer", "traj_viewer_port", "traj_viewer_root",
+    "temperature", "rl", "default_model", "override_model",
+    "parse_arguments", "auto_retry",
 ]
 
 # Fields that are always written to RECENT (even if matching DEFAULT)
@@ -106,11 +113,11 @@ def _yaml_to_cli_key(yaml_key):
 
 def _yaml_value(key, value):
     """Coerce a YAML value to the correct Python type for the given config key."""
-    if key in ("port",):
+    if key in ("port", "traj_viewer_port"):
         return int(value)
     if key in ("temperature",):
         return float(value)
-    if key in ("rl",):
+    if key in ("rl", "traj_viewer"):
         return bool(value)
     if value is None:
         return None
@@ -187,6 +194,16 @@ def parse_args():
                         choices=["none", "multi", "multi-strict", "single"],
                         help="ChatML recording mode: none, multi, multi-strict, single")
     parser.add_argument("--session-name", default=_UNSET, help="Initial session name")
+    parser.add_argument("--image-mode", default=_UNSET,
+                        help="ChatML image storage: 'inline' (base64 in JSON) or 'files' (separate files)")
+    parser.add_argument("--image-folder", default=_UNSET,
+                        help="Directory for extracted images in files mode (default: <session-path>/images)")
+    parser.add_argument("--traj-viewer", default=None, action="store_true",
+                        help="Start a read-only trajectory viewer")
+    parser.add_argument("--traj-viewer-port", default=_UNSET, type=int,
+                        help="Preferred trajectory viewer port (default: 8330; falls back if busy)")
+    parser.add_argument("--traj-viewer-root", default=_UNSET,
+                        help="Root directory scanned recursively for trajectory dirs (default: session-path)")
     parser.add_argument("--session-path", default=_UNSET,
                         help="ChatML output path (defaults to --log-folder)")
     parser.add_argument("--temperature", default=_UNSET, type=float,
@@ -254,7 +271,7 @@ def parse_args():
         """Get CLI value for field, returning _UNSET if not explicitly provided."""
         # argparse action="store_true" always returns True/False, never _UNSET,
         # so detect via the actual dest attr
-        if key in ("rl", "override_model", "parse_arguments"):
+        if key in ("rl", "override_model", "parse_arguments", "traj_viewer"):
             return _UNSET if getattr(cli_args, key) is None else getattr(cli_args, key)
         return getattr(cli_args, key)
 
@@ -290,6 +307,12 @@ def parse_args():
 
     preset_name_str = preset_name if preset_name else None
     resolved["preset"] = preset_name_str
+
+    # Validate image mode
+    if resolved["image_mode"] not in ("inline", "files"):
+        parser.error("--image-mode must be 'inline' or 'files'")
+    if not (1 <= resolved["traj_viewer_port"] <= 65535):
+        parser.error("--traj-viewer-port must be between 1 and 65535")
 
     # Parse auto-retry status codes
     resolved["_auto_retry_codes"] = _parse_auto_retry_codes(resolved["auto_retry"])

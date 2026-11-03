@@ -141,11 +141,57 @@ On startup, the proxy logs all resolved parameters; values differing from `DEFAU
 | `--log-chatml` | `none` | ChatML recording mode: `none` (disabled), `multi` (prefix-matched multi-turn), `single` (one entry per request) |
 | `--session-name` | `sess_MMdd_HHmmss` | Name for the initial ChatML session |
 | `--session-path` | *(--log-folder)* | ChatML output directory (defaults to `--log-folder`) |
+| `--image-mode` | `inline` | ChatML image storage: `inline` (base64 data URL inside JSON) or `files` (decode into separate files and reference them by relative path) |
+| `--image-folder` | *(images/)* | Directory for extracted images in `files` mode (default: `<session-path>/images`) |
+| `--traj-viewer` | `false` | Start a read-only HTTP trajectory viewer |
+| `--traj-viewer-port` | `8330` | Preferred viewer port (falls back to the next free port) |
+| `--traj-viewer-root` | *(session-path)* | Root directory scanned recursively for any directory containing `*.chatml.json`; the page's dropdown switches between them |
 | `--temperature` | `-1.0` | Default temperature injected into upstream requests when absent from the client request. Disabled when negative |
 | `--rl` | `false` | Enable RL-specific ChatML logging — requests logprobs & token_ids from upstream, records them alongside each assistant response |
 | `--default-model` | `None` | Default model name when the request's `model` field is empty or `"none"`. If not specified and upstream is reachable, auto-populated from the first available model. |
 | `--preset` | `None` | Name of a YAML config group to load (e.g. `DEEPSEEK`). Values from this group override RECENT and DEFAULT. |
 | `--config-file` | *(auto)* | Path to YAML config file. Overrides the default lookup. |
+
+### Image storage
+
+By default images (e.g. screenshots) stay inline as base64 data URLs:
+`messages[i].content[j].image_url.url = "data:image/png;base64,..."`.
+
+With `--image-mode files`, each data URL is decoded into `--image-folder`
+(default `<session-path>/images`), and the JSON stores a path relative to the
+ChatML file:
+
+```bash
+llm-data-proxy ... --image-mode files --image-folder images
+# messages[i].content[j].image_url.url == "images/sess_m1_p1_<sha1>.png"
+```
+
+`/session_chats` always returns inline data URLs; it never writes image files.
+
+### Trajectory viewer
+
+`--traj-viewer` starts a read-only viewer on `http://127.0.0.1:8330`
+(or the next free port if 8330 is busy):
+
+```bash
+llm-data-proxy ... --log-chatml multi --traj-viewer
+# trajectory viewer: http://127.0.0.1:8330
+```
+
+The page has a directory selector listing every directory that contains
+`*.chatml.json` under `--traj-viewer-root` (default: the current
+`--session-path`), plus every directory ever used by `POST /newsession`
+(so trajectories written to arbitrary external paths also appear). Selecting a
+directory shows **only its direct sessions** (it does not merge nested
+directories).
+
+Click a session to render the full trajectory: role-specific cards (system /
+user / assistant / tool), timestamps, reasoning, tool calls, and images. Images
+are shown inline, including files produced by `--image-mode files`.
+Each card's top-right shows `Msg-<message index> Turn-<turn index>`: every
+system/user/assistant/tool message counts as one message, and a new turn starts
+when a non-assistant message is immediately followed by an assistant message.
+The viewer binds to `127.0.0.1`; use an SSH tunnel for remote access.
 
 ## Endpoints
 

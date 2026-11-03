@@ -204,6 +204,7 @@ def create_app(base_url: str, api_key: str, session_manager: SessionManager,
             new_name = "sess_" + datetime.now().strftime("%m%d_%H%M%S")
         session_manager.session_name = new_name
         session_manager.session_path = new_path or session_manager.log_folder
+        session_manager.remember_session_path(session_manager.session_path)
         logger.info("newsession: switched to '%s' (path=%s)", new_name,
                     session_manager.session_path)
         return {"status": "ok", "session_name": new_name,

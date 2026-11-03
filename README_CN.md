@@ -141,11 +141,52 @@ client = OpenAI(base_url="http://127.0.0.1:8030/v1", api_key="anything")
 | `--log-chatml` | `none` | ChatML 记录模式：`none`（禁用）、`multi`（前缀匹配多轮对话）、`single`（每个请求一条记录） |
 | `--session-name` | `sess_MMdd_HHmmss` | 初始 ChatML 会话名称 |
 | `--session-path` | *(--log-folder)* | ChatML 输出目录（默认使用 `--log-folder`） |
+| `--image-mode` | `inline` | ChatML 图片保存方式：`inline`（base64 data URL 内嵌在 JSON）或 `files`（解码为独立文件，JSON 中存相对路径） |
+| `--image-folder` | *(images/)* | `files` 模式下的图片目录（默认 `<session-path>/images`） |
+| `--traj-viewer` | `false` | 启动只读的轨迹展示 HTTP 服务 |
+| `--traj-viewer-port` | `8330` | 展示服务首选端口（被占用时自动顺延到空闲端口） |
+| `--traj-viewer-root` | *(session-path)* | 递归扫描的根目录，找出所有含 `*.chatml.json` 的目录；页面下拉框可切换 |
 | `--temperature` | `-1.0` | 当客户端请求中缺少 temperature 时，注入到上游请求的默认 temperature。负值时禁用 |
 | `--rl` | `false` | 启用 RL 专用的 ChatML 日志 — 从上游请求 logprobs 和 token_ids，并将其记录在每个 assistant 回复旁 |
 | `--default-model` | `None` | 当请求中 `model` 字段为空或为 `"none"` 时的默认模型名称。若未指定且上游可达，则自动从第一个可用模型填充。 |
 | `--preset` | `None` | 要加载的 YAML 配置分组名称（如 `DEEPSEEK`）。该分组的值覆盖 RECENT 和 DEFAULT。 |
 | `--config-file` | *(自动)* | YAML 配置文件路径。覆盖默认查找逻辑。 |
+
+### 图片存储
+
+默认情况下，图片（例如截图）以内嵌 base64 data URL 的形式保存在 JSON 中：
+`messages[i].content[j].image_url.url = "data:image/png;base64,..."`。
+
+使用 `--image-mode files` 时，每个 data URL 会被解码到 `--image-folder`
+（默认 `<session-path>/images`），JSON 中改为保存相对 ChatML 文件的路径：
+
+```bash
+llm-data-proxy ... --image-mode files --image-folder images
+# messages[i].content[j].image_url.url == "images/sess_m1_p1_<sha1>.png"
+```
+
+`/session_chats` 接口始终返回内嵌 data URL，不会写图片文件。
+
+### 轨迹展示
+
+带上 `--traj-viewer` 会在 `http://127.0.0.1:8330`（被占用则自动换空闲端口）
+启动只读展示服务：
+
+```bash
+llm-data-proxy ... --log-chatml multi --traj-viewer
+# trajectory viewer: http://127.0.0.1:8330
+```
+
+页面顶部的目录下拉框列出 `--traj-viewer-root`（默认当前 `--session-path`）
+下递归找到的所有包含 `*.chatml.json` 的目录，以及所有通过 `POST /newsession`
+使用过的目录（写到任意外部路径的轨迹也会出现）。选择某个目录后只展示
+**该目录直接包含的 session**，不会合并子目录。
+
+点击 session 查看完整轨迹：按 role 分色的卡片（system / user / assistant /
+tool）、时间戳、reasoning、tool_calls 和图片（包括 `--image-mode files` 的图片）。
+每张卡片右上角显示 `Msg-<消息序号> Turn-<轮次>`：每个 system/user/assistant/tool
+算一条 message；非 assistant 消息紧跟一个 assistant 时开始新的一轮，两条消息
+同属该轮。服务默认只监听 `127.0.0.1`，远程访问请用 SSH 隧道。
 
 ## 接口
 

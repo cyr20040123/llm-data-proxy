@@ -1,5 +1,6 @@
 """Unit tests for SessionManager."""
 
+import base64
 import json
 import os
 import tempfile
@@ -490,6 +491,81 @@ class TestSessionManager:
             args = mgr.sessions[0]["messages"][1]["tool_calls"][0]["function"]["arguments"]
             assert isinstance(args, str)
             assert args == '{"city": "Shenzhen"}'
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+
+    def test_dump_images_inline_by_default(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi", session_path=d)
+            raw = b"\x89PNG\r\n\x1a\nDATA"
+            url = "data:image/png;base64," + base64.b64encode(raw).decode()
+            sess = mgr.create_session([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Q"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            }], "ts")
+            mgr.append_response(sess, {"role": "assistant", "content": "A"}, "ts2")
+            out = mgr.dump_all()
+            with open(os.path.join(out, "test_sess.chatml.json")) as f:
+                data = json.load(f)
+            assert data["messages"][0]["content"][1]["image_url"]["url"] == url
+            assert not os.path.isdir(os.path.join(out, "images"))
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dump_images_files_mode(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi", session_path=d,
+                                 image_mode="files")
+            raw = b"\x89PNG\r\n\x1a\nDATA"
+            url = "data:image/png;base64," + base64.b64encode(raw).decode()
+            sess = mgr.create_session([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Q"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            }], "ts")
+            mgr.append_response(sess, {"role": "assistant", "content": "A"}, "ts2")
+            out = mgr.dump_all()
+            with open(os.path.join(out, "test_sess.chatml.json")) as f:
+                data = json.load(f)
+            rel = data["messages"][0]["content"][1]["image_url"]["url"]
+            assert not rel.startswith("data:")
+            assert rel.startswith("images" + os.sep)
+            path = os.path.join(out, rel)
+            assert os.path.isfile(path)
+            with open(path, "rb") as f:
+                assert f.read() == raw
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dump_images_files_mode_custom_folder(self):
+        d = tempfile.mkdtemp()
+        try:
+            mgr = SessionManager(d, "test_sess", "multi", session_path=d,
+                                 image_mode="files", image_folder="imgs")
+            url = "data:image/jpeg;base64," + base64.b64encode(b"JPGDATA").decode()
+            sess = mgr.create_session([{
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": url}}],
+            }], "ts")
+            mgr.append_response(sess, {"role": "assistant", "content": "A"}, "ts2")
+            out = mgr.dump_all()
+            with open(os.path.join(out, "test_sess.chatml.json")) as f:
+                data = json.load(f)
+            rel = data["messages"][0]["content"][0]["image_url"]["url"]
+            assert rel.startswith("imgs" + os.sep)
+            assert rel.endswith(".jpg")
+            assert os.path.isfile(os.path.join(out, rel))
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
