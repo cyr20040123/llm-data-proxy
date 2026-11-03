@@ -188,6 +188,64 @@ tool）、时间戳、reasoning、tool_calls 和图片（包括 `--image-mode fi
 算一条 message；非 assistant 消息紧跟一个 assistant 时开始新的一轮，两条消息
 同属该轮。服务默认只监听 `127.0.0.1`，远程访问请用 SSH 隧道。
 
+### OSWorld 轨迹采集与查看
+
+下面以 OSWorld + DeepSeek 为例，把 OSWorld 的模型请求指向 llm-data-proxy，并采集/查看 ChatML 轨迹。
+
+**1. 启动代理**
+
+```bash
+llm-data-proxy --host 127.0.0.1 --port 8030 \
+  --base-url https://api.deepseek.com/v1 \
+  --api-key "$DEEPSEEK_API_KEY" \
+  --log-folder ./logs --session-path ./trajs/osworld \
+  --log-chatml multi --image-mode files \
+  --traj-viewer --traj-viewer-port 8330 \
+  --traj-viewer-root ./trajs
+```
+
+- `--base-url` 是上游 OpenAI 兼容地址（DeepSeek 用 `https://api.deepseek.com/v1`）。
+- `--api-key` 填真实上游 key；OSWorld 侧用占位 key 即可。
+- `--image-mode files` 可选，避免把 base64 截图塞进 JSON；图片写到 `<session-path>/images/`。
+- `--traj-viewer-root` 建议设为 `session-path` 的父目录，方便在 8330 页面下拉切换多个轨迹目录。
+
+**2. 让 OSWorld 走代理**
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8030/v1
+export OPENAI_API_KEY=sk-proxy          # 占位，代理会替换成上游 key
+export OSWORLD_TRAJ_PROXY=http://127.0.0.1:8030
+export OSWORLD_TRAJ_PATH="$PWD/trajs/osworld"
+export OSWORLD_TRAJ_SESSION_PREFIX=osworld   # 可选；session 名 = 前缀_题目id_时间
+```
+
+然后按原方式运行 OSWorld：
+
+```bash
+cd /path/to/OSWorld
+python scripts/python/run_multienv.py \
+  --provider_name docker --headless \
+  --observation_type screenshot --model deepseek-flash \
+  --num_envs 1 --max_steps 50 --sleep_after_execution 3 \
+  --result_dir ./results
+```
+
+每个任务会通过 `POST /newsession` 切换到 `osworld_<题目id>_<YYYYmmdd_HHMMSS>`，任务结束后落盘到 `OSWORLD_TRAJ_PATH`。
+
+**3. 查看轨迹**
+
+打开 `http://127.0.0.1:8330`（远程用 SSH 隧道），在顶部下拉框选择轨迹目录，点击 session 即可查看完整轨迹；卡片右上角显示 `Msg-<消息序号> Turn-<轮次>`。
+
+> 说明：每题自动 `/newsession` 的能力来自本机 OSWorld `run_multienv.py` 的 `OSWORLD_TRAJ_*` 钩子；使用原版 OSWorld 时需要在任务开始/结束自行调用 `/newsession`（或每题单独启动一个代理），否则轨迹可能被滑动窗口续接到同一个 session。
+
+**注意事项**
+
+- **一个代理 URL 只支持单 agent / 单并发实例。** 请保持 `--num_envs 1`；多个 agent 共用一个代理端口会让不同任务的对话相互干扰，导致轨迹混杂、无法区分。
+- 如果确实要并发采集，需要**每个 env 一个代理端口**（不同 `--port` 和 `--session-path`），并让每个 env 分别设置 `OPENAI_BASE_URL` / `OSWORLD_TRAJ_PROXY` / `OSWORLD_TRAJ_PATH`；不要共用同一个 URL。
+- `OPENAI_API_KEY` 在 OSWorld 侧只是占位符，真实 key 只放在代理的 `--api-key` 中。
+- `--log-chatml` 必须为 `multi` 或 `multi-strict` 才会记录轨迹；viewer 也依赖它展示 live session。
+- viewer 默认只监听 `127.0.0.1`；远程访问请使用 SSH 隧道，例如 `ssh -N -L 8330:127.0.0.1:8330 用户@服务器`。
+
 ## 接口
 
 | 方法 | 路径 | 说明 |
