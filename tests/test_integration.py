@@ -189,7 +189,7 @@ class TestProxyEndpoints:
         with open(filepath) as f:
             data = json.load(f)
         assert "messages" in data
-        # The proxy fixture runs in "multi" mode, which never truncates and
+        # The proxy fixture runs in "merged" mode, which never truncates and
         # never adds "remarks"; only "multi-strict" mode does.
         assert "remarks" not in data
         assert len(data["messages"]) >= 2

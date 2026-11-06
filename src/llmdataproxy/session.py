@@ -129,13 +129,41 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _split_turns(messages):
+    """Group non-system, non-hint messages into assistant-ending turns.
+
+    A turn starts after the previous assistant message and includes every
+    user/tool/assistant message up to and including the next assistant.
+    Messages after the last assistant form one incomplete turn.
+
+    Returns a list of ``{"items": [(index, message), ...], "complete": bool}``.
+    """
+    turns = []
+    current = []
+    for idx, msg in enumerate(messages):
+        if msg.get("role") == "system" or _is_hint_message(msg):
+            continue
+        current.append((idx, msg))
+        if msg.get("role") == "assistant":
+            turns.append({"items": current, "complete": True})
+            current = []
+    if current:
+        turns.append({"items": current, "complete": False})
+    return turns
+
+
+def _turn_key(turn):
+    """Canonical key for a turn, used for merged-mode matching."""
+    return tuple(_canonical(msg) for _, msg in turn["items"])
+
+
 class SessionManager:
     def __init__(self, log_folder, session_name, mode, session_path="",
                  rl_enabled=False, parse_arguments=False,
                  image_mode="inline", image_folder=""):
         self.log_folder = log_folder
         self.session_name = session_name
-        self.mode = mode  # "none", "multi", "multi-strict", "single"
+        self.mode = mode  # "none", "multi", "multi-strict", "merged", "single"
         self.session_path = session_path or log_folder
         self.rl_enabled = rl_enabled
         self.parse_arguments = parse_arguments
@@ -161,6 +189,10 @@ class SessionManager:
     @property
     def _is_multi_like(self):
         return self.mode in ("multi", "multi-strict")
+
+    @property
+    def _is_merged(self):
+        return self.mode == "merged"
 
     # ------------------------------------------------------------------
     # Prefix matching
@@ -243,11 +275,97 @@ class SessionManager:
         return None, 0
 
     # ------------------------------------------------------------------
+    # Merged matching
+    # ------------------------------------------------------------------
+    def find_merged_session(self, request_messages):
+        """Find a session using the lenient 'merged' turn-overlap rule.
+
+        Consider every completed assistant turn in the request.  Together
+        with the response about to be appended, these are all turns up to and
+        including the penultimate assistant turn.  If at least
+        ``max(1, ceil(x / 2))`` of those *x* turns already exist in a session,
+        treat it as the same conversation.
+
+        Returns ``(session, append_indices)`` where *append_indices* are the
+        indices of request messages that are not already represented in the
+        session.  Matched turns are dropped; unmatched turns are appended.
+        """
+        if not self._is_merged:
+            return None, []
+
+        request_turns = _split_turns(request_messages)
+        complete_turns = [t for t in request_turns if t["complete"]]
+        if not complete_turns:
+            return None, []
+
+        # The current response is not in the request yet.  All completed
+        # request turns are therefore up to and including the penultimate
+        # assistant turn of the combined request+response.
+        prefix = complete_turns
+        x = len(prefix)
+        required = max(1, (x + 1) // 2)
+
+        best = None  # (score, session, append_indices, matched)
+        for sess in self.sessions:
+            sess_turns = _split_turns(sess["messages"])
+            if not sess_turns:
+                continue
+
+            available = {}
+            for turn in sess_turns:
+                key = _turn_key(turn)
+                available[key] = available.get(key, 0) + 1
+
+            matched = 0
+            for turn in prefix:
+                key = _turn_key(turn)
+                if available.get(key, 0):
+                    available[key] -= 1
+                    matched += 1
+
+            if matched < required:
+                continue
+
+            score = (matched, len(sess_turns))
+            if best is None or score > best[0]:
+                append_indices = self._unmatched_turn_indices(
+                    request_turns, sess_turns
+                )
+                best = (score, sess, append_indices, matched)
+
+        if best is None:
+            return None, []
+
+        logger.info(
+            "merged session match: %d/%d turns (required %d), "
+            "appending %d messages",
+            best[3], x, required, len(best[2]),
+        )
+        return best[1], best[2]
+
+    @staticmethod
+    def _unmatched_turn_indices(request_turns, session_turns):
+        """Return message indices from request turns not present in session."""
+        available = {}
+        for turn in session_turns:
+            key = _turn_key(turn)
+            available[key] = available.get(key, 0) + 1
+
+        indices = []
+        for turn in request_turns:
+            key = _turn_key(turn)
+            if available.get(key, 0):
+                available[key] -= 1
+            else:
+                indices.extend(idx for idx, _ in turn["items"])
+        return indices
+
+    # ------------------------------------------------------------------
     # Session creation / update
     # ------------------------------------------------------------------
     def create_session(self, request_messages, timestamp, tools=None):
-        """Create a new session.  In 'multi' mode only the *last* message
-        gets a real timestamp.  In 'single' mode timestamps are omitted."""
+        """Create a new session.  In merged/multi modes only the *last*
+        message gets a real timestamp.  In 'single' mode timestamps are omitted."""
         session = {"messages": [], "tools": []}
         if tools:
             session["tools"] = list(tools)
@@ -272,13 +390,29 @@ class SessionManager:
             if self.parse_arguments:
                 _normalize_msg_arguments(msg)
             session["messages"].append({**msg, "timestamp": ts})
-        if tools:
-            known = {t.get("function", {}).get("name") for t in session["tools"]}
-            for t in tools:
-                name = t.get("function", {}).get("name")
-                if name and name not in known:
-                    session["tools"].append(t)
-                    known.add(name)
+        self._merge_tools(session, tools)
+
+    def append_merged_request_messages(self, session, request_messages, indices,
+                                       timestamp, tools=None):
+        """Append only the selected request messages to a merged session."""
+        ts = "" if self.mode == "single" else timestamp
+        for idx in indices:
+            msg = request_messages[idx]
+            if self.parse_arguments:
+                _normalize_msg_arguments(msg)
+            session["messages"].append({**msg, "timestamp": ts})
+        self._merge_tools(session, tools)
+
+    @staticmethod
+    def _merge_tools(session, tools):
+        if not tools:
+            return
+        known = {t.get("function", {}).get("name") for t in session["tools"]}
+        for t in tools:
+            name = t.get("function", {}).get("name")
+            if name and name not in known:
+                session["tools"].append(t)
+                known.add(name)
 
     def append_response(self, session, response_message, timestamp):
         """Append an assistant response message.  Timestamp omitted in 'single' mode."""

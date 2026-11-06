@@ -19,7 +19,7 @@ pip install -e ".[brotli]"
 ## 快速开始
 
 ```bash
-llm-data-proxy --base-url http://localhost:8000 --api-key sk-your-key --log-chatml multi
+llm-data-proxy --base-url http://localhost:8000 --api-key sk-your-key --log-chatml merged
 ```
 
 该命令在 `0.0.0.0:8030` 启动代理，转发请求到 `http://localhost:8000`，并启用 ChatML 日志记录。
@@ -37,7 +37,7 @@ python -m llmdataproxy --base-url http://localhost:8000 --api-key sk-your-key
 ### 1. 启动代理
 
 ```bash
-llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml multi
+llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml merged
 ```
 
 代理监听 `0.0.0.0:8030`，转发请求到 `http://127.0.0.1:8000`。
@@ -61,7 +61,7 @@ client = OpenAI(base_url="http://127.0.0.1:8030/v1", api_key="anything")
        → session 新增: [user(t=14:02:00), assistant(t=14:02:01)]
 ```
 
-**前缀匹配**：代理将客户端发来的消息历史与已记录的 session 逐一比较。如果新消息能续接到已有 session，则继续该 session；匹配不上则创建新 session。
+**会话匹配**：代理将客户端发来的消息历史与已记录的 session 逐一比较。默认 `merged` 模式使用宽松的 turn 重叠匹配，`multi` 模式使用严格前缀匹配；达到匹配条件则续接已有 session，否则创建新 session。
 
 ### 4. 保存轨迹
 
@@ -138,7 +138,7 @@ client = OpenAI(base_url="http://127.0.0.1:8030/v1", api_key="anything")
 | `--base-url` | *(必填)* | 上游 LLM 服务地址（如 `http://localhost:8000`）。若缺少 `/v1` 前缀，启动时会自动检测并补全。 |
 | `--api-key` | `""` | 上游 API 密钥 — 替换客户端发送的任意密钥 |
 | `--log-folder` | `./logs/` | 日志和 ChatML 输出目录 |
-| `--log-chatml` | `none` | ChatML 记录模式：`none`（禁用）、`multi`（前缀匹配多轮对话）、`single`（每个请求一条记录） |
+| `--log-chatml` | `merged` | ChatML 记录模式：`none`（禁用）、`merged`（宽松 turn 重叠合并）、`multi`（前缀匹配多轮对话）、`multi-strict`（前缀匹配并标记不完整）、`single`（每个请求一条记录） |
 | `--session-name` | `sess_MMdd_HHmmss` | 初始 ChatML 会话名称 |
 | `--session-path` | *(--log-folder)* | ChatML 输出目录（默认使用 `--log-folder`） |
 | `--image-mode` | `inline` | ChatML 图片保存方式：`inline`（base64 data URL 内嵌在 JSON）或 `files`（解码为独立文件，JSON 中存相对路径） |
@@ -173,7 +173,7 @@ llm-data-proxy ... --image-mode files --image-folder images
 启动只读展示服务：
 
 ```bash
-llm-data-proxy ... --log-chatml multi --traj-viewer
+llm-data-proxy ... --log-chatml merged --traj-viewer
 # trajectory viewer: http://127.0.0.1:8330
 ```
 
@@ -199,7 +199,7 @@ llm-data-proxy --host 127.0.0.1 --port 8030 \
   --base-url https://api.deepseek.com/v1 \
   --api-key "$DEEPSEEK_API_KEY" \
   --log-folder ./logs --session-path ./trajs/osworld \
-  --log-chatml multi --image-mode files \
+  --log-chatml merged --image-mode files \
   --traj-viewer --traj-viewer-port 8330 \
   --traj-viewer-root ./trajs
 ```
@@ -243,7 +243,7 @@ python scripts/python/run_multienv.py \
 - **一个代理 URL 只支持单 agent / 单并发实例。** 请保持 `--num_envs 1`；多个 agent 共用一个代理端口会让不同任务的对话相互干扰，导致轨迹混杂、无法区分。
 - 如果确实要并发采集，需要**每个 env 一个代理端口**（不同 `--port` 和 `--session-path`），并让每个 env 分别设置 `OPENAI_BASE_URL` / `OSWORLD_TRAJ_PROXY` / `OSWORLD_TRAJ_PATH`；不要共用同一个 URL。
 - `OPENAI_API_KEY` 在 OSWorld 侧只是占位符，真实 key 只放在代理的 `--api-key` 中。
-- `--log-chatml` 必须为 `multi` 或 `multi-strict` 才会记录轨迹；viewer 也依赖它展示 live session。
+- `--log-chatml` 必须为 `merged`、`multi` 或 `multi-strict` 才会记录轨迹；viewer 也依赖它展示 live session。
 - viewer 默认只监听 `127.0.0.1`；远程访问请使用 SSH 隧道，例如 `ssh -N -L 8330:127.0.0.1:8330 用户@服务器`。
 
 ## 接口
@@ -384,7 +384,16 @@ curl -X POST http://localhost:8030/hint \
 
 ## ChatML 输出
 
-当 `--log-chatml` 设置为 `multi` 或 `single` 时，对话历史将保存为 JSON 文件，输出到 `--session-path`（默认使用 `--log-folder`）。
+当 `--log-chatml` 设置为 `merged`、`multi`、`multi-strict` 或 `single` 时，对话历史将保存为 JSON 文件，输出到 `--session-path`（默认使用 `--log-folder`）。
+
+### `merged` 模式（宽松 turn 重叠合并）
+
+这是默认模式，适合只回传滑动窗口历史、或历史与代理记录略有差异的客户端。
+
+- 将请求按 assistant 结尾切分为 turn：一个 turn 包含上一条 assistant 之后到本条 assistant 之间的消息，以及本条 assistant。
+- 取请求中所有已完成的 assistant turn；加上即将追加的当前响应后，这些正好是**倒数第二个 assistant turn 之前（含该 turn）** 的所有 turn，数量记为 `x`。
+- 如果这些 turn 中至少有 `max(1, ceil(x / 2))` 个已存在于某个 session，就把请求追加到该 session。
+- 已匹配的 turn 会被删除（因为 session 中已有），未匹配的 turn 和当前响应会追加到末尾；没有 session 达到阈值时创建新 session。
 
 ### `multi` 模式（前缀匹配）
 
@@ -427,7 +436,7 @@ curl -X POST http://localhost:8030/hint \
 ### 通用说明
 
 - 消息使用标准 OpenAI 角色（`system`、`user`、`assistant`、`tool`）
-- 每条消息带有 ISO 8601 格式的 `timestamp` — 代理未直接见证的消息该字段为空字符串（`multi` 模式），或始终为空（`single` 模式）
+- 每条消息带有 ISO 8601 格式的 `timestamp` — 代理未直接见证的消息该字段为空字符串（`merged`/`multi` 模式），或始终为空（`single` 模式）
 - 当对话在中途被截断时，`remarks.incomplete` 为 `true`
 - 工具调用存储在 assistant 消息的 `tool_calls` 字段中
 - 工具定义（如有）包含在顶层的 `tools` 数组中

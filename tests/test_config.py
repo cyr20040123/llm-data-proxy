@@ -132,3 +132,6 @@ class TestHardDefaults:
 
     def test_default_port(self):
         assert _HARD_DEFAULTS["port"] == 8030
+
+    def test_default_log_chatml_is_merged(self):
+        assert _HARD_DEFAULTS["log_chatml"] == "merged"

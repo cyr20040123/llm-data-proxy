@@ -19,7 +19,7 @@ _HARD_DEFAULTS = {
     "base_url": "",
     "api_key": "",
     "log_folder": "./logs/",
-    "log_chatml": "none",
+    "log_chatml": "merged",
     "session_name": None,
     "session_path": "",
     "image_mode": "inline",
@@ -191,8 +191,8 @@ def parse_args():
     parser.add_argument("--api-key", default=_UNSET, help="Upstream API key")
     parser.add_argument("--log-folder", default=_UNSET, help="Log and output directory")
     parser.add_argument("--log-chatml", default=_UNSET,
-                        choices=["none", "multi", "multi-strict", "single"],
-                        help="ChatML recording mode: none, multi, multi-strict, single")
+                        choices=["none", "merged", "multi", "multi-strict", "single"],
+                        help="ChatML recording mode: none, merged, multi, multi-strict, single")
     parser.add_argument("--session-name", default=_UNSET, help="Initial session name")
     parser.add_argument("--image-mode", default=_UNSET,
                         help="ChatML image storage: 'inline' (base64 in JSON) or 'files' (separate files)")
@@ -311,6 +311,8 @@ def parse_args():
     # Validate image mode
     if resolved["image_mode"] not in ("inline", "files"):
         parser.error("--image-mode must be 'inline' or 'files'")
+    if resolved["log_chatml"] not in ("none", "merged", "multi", "multi-strict", "single"):
+        parser.error("--log-chatml must be one of: none, merged, multi, multi-strict, single")
     if not (1 <= resolved["traj_viewer_port"] <= 65535):
         parser.error("--traj-viewer-port must be between 1 and 65535")
 

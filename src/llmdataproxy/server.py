@@ -288,11 +288,22 @@ async def _handle_chat_completions(request: Request, upstream: str, api_key: str
     # _normalize_msg_arguments mutates tool_calls[].function.arguments
     # from a JSON string to a dict in-place — which would corrupt the
     # request body sent to the upstream.
-    session, match_len = session_mgr.find_matching_session(messages)
-    if session is None:
-        session = session_mgr.create_session(copy.deepcopy(messages), req_ts, tools)
+    if session_mgr.mode == "merged":
+        session, append_indices = session_mgr.find_merged_session(messages)
+        if session is None:
+            session = session_mgr.create_session(copy.deepcopy(messages), req_ts, tools)
+        else:
+            session_mgr.append_merged_request_messages(
+                session, copy.deepcopy(messages), append_indices, req_ts, tools
+            )
     else:
-        session_mgr.append_request_messages(session, copy.deepcopy(messages), match_len, req_ts, tools)
+        session, match_len = session_mgr.find_matching_session(messages)
+        if session is None:
+            session = session_mgr.create_session(copy.deepcopy(messages), req_ts, tools)
+        else:
+            session_mgr.append_request_messages(
+                session, copy.deepcopy(messages), match_len, req_ts, tools
+            )
 
     # --- inject RL parameters ---
     if session_mgr.rl_enabled and session_mgr.enabled:

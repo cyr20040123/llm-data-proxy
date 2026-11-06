@@ -4,7 +4,7 @@ DEFAULT:
   base-url: http://127.0.0.1:8000
   api-key: ''
   log-folder: ./logs/
-  log-chatml: multi
+  log-chatml: merged
   rl: false
   parse-arguments: false
   temperature: -1.0

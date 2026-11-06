@@ -19,7 +19,7 @@ pip install -e ".[brotli]"
 ## Quick Start
 
 ```bash
-llm-data-proxy --base-url http://localhost:8000 --api-key sk-your-key --log-chatml multi
+llm-data-proxy --base-url http://localhost:8000 --api-key sk-your-key --log-chatml merged
 ```
 
 This starts the proxy on `0.0.0.0:8030`, forwarding to `http://localhost:8000` with ChatML logging enabled.
@@ -37,7 +37,7 @@ python -m llmdataproxy --base-url http://localhost:8000 --api-key sk-your-key
 ### 1. Start the proxy
 
 ```bash
-llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml multi
+llm-data-proxy --base-url http://127.0.0.1:8000 --log-chatml merged
 ```
 
 Proxy listens on `0.0.0.0:8030`, forwards requests to `http://127.0.0.1:8000`.
@@ -61,7 +61,7 @@ Turn 2: client sends [sys, user:"Hello", assistant:"Hi!", user:"How are you?"]
         → session adds: [user(t=14:02:00), assistant(t=14:02:01)]
 ```
 
-**Prefix matching**: the proxy compares incoming message history against recorded sessions. If a suffix can be appended to an existing session, it continues that session. Otherwise, a new session is created.
+**Session matching**: the proxy compares incoming message history against recorded sessions. The default `merged` mode uses lenient turn overlap; `multi` uses exact prefix matching. If a match passes, the request continues that session; otherwise, a new session is created.
 
 ### 4. Save trajectories
 
@@ -138,7 +138,7 @@ On startup, the proxy logs all resolved parameters; values differing from `DEFAU
 | `--base-url` | *(required)* | Upstream LLM service URL (e.g. `http://localhost:8000`). The `/v1` prefix is auto-detected on startup if missing. |
 | `--api-key` | `""` | Upstream API key — replaces any key sent by the client |
 | `--log-folder` | `./logs/` | Directory for logs and ChatML output |
-| `--log-chatml` | `none` | ChatML recording mode: `none` (disabled), `multi` (prefix-matched multi-turn), `single` (one entry per request) |
+| `--log-chatml` | `merged` | ChatML recording mode: `none` (disabled), `merged` (lenient turn-overlap merge), `multi` (prefix-matched multi-turn), `multi-strict` (prefix match + incomplete remarks), `single` (one entry per request) |
 | `--session-name` | `sess_MMdd_HHmmss` | Name for the initial ChatML session |
 | `--session-path` | *(--log-folder)* | ChatML output directory (defaults to `--log-folder`) |
 | `--image-mode` | `inline` | ChatML image storage: `inline` (base64 data URL inside JSON) or `files` (decode into separate files and reference them by relative path) |
@@ -174,7 +174,7 @@ llm-data-proxy ... --image-mode files --image-folder images
 (or the next free port if 8330 is busy):
 
 ```bash
-llm-data-proxy ... --log-chatml multi --traj-viewer
+llm-data-proxy ... --log-chatml merged --traj-viewer
 # trajectory viewer: http://127.0.0.1:8330
 ```
 
@@ -331,7 +331,16 @@ curl -X POST http://localhost:8030/hint \
 
 ## ChatML Output
 
-When `--log-chatml` is set to `multi` or `single`, conversation history is saved as JSON files in `--session-path` (defaults to `--log-folder`).
+When `--log-chatml` is set to `merged`, `multi`, `multi-strict`, or `single`, conversation history is saved as JSON files in `--session-path` (defaults to `--log-folder`).
+
+### `merged` mode (lenient turn-overlap)
+
+This is the default mode. It is designed for clients that resend only a sliding window of the conversation, or whose history may differ slightly from what the proxy recorded.
+
+- Split the request into assistant-ending turns (a turn includes the messages between two assistant messages, plus the assistant itself).
+- Consider every completed assistant turn in the request. Together with the current response, these are all turns up to and including the **penultimate assistant turn**. Let this count be `x`.
+- If at least `max(1, ceil(x / 2))` of those turns already exist in a session, append the request to that session.
+- Turns already present in the session are dropped; unmatched turns and the current response are appended. If no session passes the threshold, a new session is created.
 
 ### `multi` mode (prefix-matched)
 
@@ -374,7 +383,7 @@ With `--rl`, each assistant response message gains three additional fields at th
 ### General notes
 
 - Messages use standard OpenAI roles (`system`, `user`, `assistant`, `tool`)
-- Each message has an ISO 8601 `timestamp` — empty string for messages the proxy didn't directly witness (`multi` mode) or always empty (`single` mode)
+- Each message has an ISO 8601 `timestamp` — empty string for messages the proxy didn't directly witness (`merged`/`multi` modes) or always empty (`single` mode)
 - `remarks.incomplete` is `true` when a conversation was cut off mid-turn
 - Tool calls are stored in the `tool_calls` field of assistant messages
 - Tool definitions are included in the top-level `tools` array when present

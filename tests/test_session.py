@@ -571,6 +571,149 @@ class TestSessionManager:
             shutil.rmtree(d, ignore_errors=True)
 
 
+class TestMergedMode:
+    @pytest.fixture
+    def mgr(self):
+        d = tempfile.mkdtemp()
+        mgr = SessionManager(d, "test_sess", "merged", session_path=d)
+        yield mgr
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+    @staticmethod
+    def _user(text):
+        return {"role": "user", "content": text}
+
+    @staticmethod
+    def _assistant(text):
+        return {"role": "assistant", "content": text}
+
+    def test_exact_prefix_uses_only_new_tail(self, mgr):
+        sess = mgr.create_session(
+            [self._user("Q1"), self._assistant("A1")], "ts"
+        )
+        request = [self._user("Q1"), self._assistant("A1"), self._user("Q2")]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is sess
+        assert indices == [2]
+
+    def test_sliding_window_drops_matched_turns(self, mgr):
+        sess = mgr.create_session([
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+            self._user("Q3"), self._assistant("A3"),
+        ], "ts")
+        request = [
+            self._user("Q2"), self._assistant("A2"),
+            self._user("Q3"), self._assistant("A3"),
+            self._user("Q4"),
+        ]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is sess
+        assert indices == [4]
+
+    def test_half_threshold_matches_and_appends_unmatched_turns(self, mgr):
+        sess = mgr.create_session([
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+            self._user("Q3"), self._assistant("A3"),
+            self._user("Q4"), self._assistant("A4"),
+        ], "ts")
+        request = [
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+            self._user("Q3-changed"), self._assistant("A3-changed"),
+            self._user("Q4-changed"), self._assistant("A4-changed"),
+            self._user("Q5"),
+        ]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is sess
+        assert indices == [4, 5, 6, 7, 8]
+
+    def test_below_half_threshold_does_not_match(self, mgr):
+        mgr.create_session([
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+            self._user("Q3"), self._assistant("A3"),
+        ], "ts")
+        request = [
+            self._user("Q1"), self._assistant("A1"),
+            self._user("X2"), self._assistant("X2A"),
+            self._user("X3"), self._assistant("X3A"),
+            self._user("X4"), self._assistant("X4A"),
+            self._user("X5"),
+        ]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is None
+        assert indices == []
+
+    def test_last_request_assistant_is_penultimate_with_response(self, mgr):
+        mgr.create_session(
+            [self._user("Q1"), self._assistant("A1")], "ts"
+        )
+        request = [
+            self._user("Q1"), self._assistant("A1"),
+            self._user("X2"), self._assistant("X2A"),
+            self._user("X3"), self._assistant("X3A"),
+            self._user("X4"),
+        ]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is None
+        assert indices == []
+
+    def test_two_of_three_request_turns_can_match(self, mgr):
+        sess = mgr.create_session([
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+        ], "ts")
+        request = [
+            self._user("Q1"), self._assistant("A1"),
+            self._user("Q2"), self._assistant("A2"),
+            self._user("X3"), self._assistant("X3A"),
+            self._user("X4"),
+        ]
+
+        found, indices = mgr.find_merged_session(request)
+
+        assert found is sess
+        assert indices == [4, 5, 6]
+
+    def test_no_complete_turn_does_not_match(self, mgr):
+        mgr.create_session(
+            [self._user("Q1"), self._assistant("A1")], "ts"
+        )
+
+        found, indices = mgr.find_merged_session([self._user("Q2")])
+
+        assert found is None
+        assert indices == []
+
+    def test_append_merged_messages_and_response(self, mgr):
+        sess = mgr.create_session(
+            [self._user("Q1"), self._assistant("A1")], "ts1"
+        )
+        request = [self._user("Q1"), self._assistant("A1"), self._user("Q2")]
+        found, indices = mgr.find_merged_session(request)
+        assert found is sess
+
+        mgr.append_merged_request_messages(sess, request, indices, "ts2")
+        mgr.append_response(sess, self._assistant("A2"), "ts3")
+
+        assert [m["content"] for m in sess["messages"]] == [
+            "Q1", "A1", "Q2", "A2"
+        ]
+
+
 class TestNowIso:
     def test_returns_iso_format(self):
         ts = _now_iso()
